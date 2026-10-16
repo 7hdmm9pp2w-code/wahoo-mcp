@@ -575,6 +575,13 @@ PERCENT_FTP_TARGET = "percent_ftp"
 # Fractions above this are almost certainly percentages (95 instead of 0.95).
 MAX_FTP_FRACTION = 3.0
 
+# Wahoo's production validator rejects intervals without targets, although the
+# published plan schema marks them optional. Untargeted steps get a free RPE.
+FREE_TARGET: WahooTarget = {"type": "rpe", "low": 1, "high": 10}
+
+# Wahoo also rejects a missing header description; it allows 5000 characters.
+MAX_DESCRIPTION_LENGTH = 5000
+
 # Plan header workout_type_family / workout_type_location per workout_type.
 WORKOUT_TYPE_HEADERS: dict[str, tuple[int, int]] = {
     "bike": (0, 0),
@@ -662,7 +669,8 @@ class WorkoutInterval(BaseModel):
 
     duration: int = Field(gt=0, description="Duration in seconds")
     targets: list[WorkoutTarget] = Field(
-        description="List of targets for this interval"
+        default_factory=list,
+        description="List of targets; an empty list becomes a free RPE 1-10 target",
     )
     name: str | None = Field(None, description="Name/description of the interval")
     interval_type: str = Field(
@@ -737,7 +745,8 @@ class WorkoutPlan(BaseModel):
         wahoo_intervals: list[WahooInterval] = []
         for interval in self.intervals:
             wahoo_interval: WahooInterval = {
-                "targets": [target.to_wahoo_format(ftp) for target in interval.targets],
+                "targets": [target.to_wahoo_format(ftp) for target in interval.targets]
+                or [dict(FREE_TARGET)],
                 "exit_trigger_type": "time",
                 "exit_trigger_value": interval.duration,
                 "intensity_type": _normalize(
@@ -751,7 +760,7 @@ class WorkoutPlan(BaseModel):
         family, location = WORKOUT_TYPE_HEADERS[self.workout_type]
         header: WahooHeader = {
             "name": self.name,
-            "description": self.description or "",
+            "description": (self.description or self.name)[:MAX_DESCRIPTION_LENGTH],
             "version": "1.0.0",
             "workout_type_family": family,
             "workout_type_location": location,

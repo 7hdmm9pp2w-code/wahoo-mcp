@@ -716,7 +716,8 @@ def _build_workout_intervals(intervals_data: list) -> list[WorkoutInterval]:
     intervals = []
     for interval_data in intervals_data:
         targets = [
-            WorkoutTarget(**target_data) for target_data in interval_data["targets"]
+            WorkoutTarget(**target_data)
+            for target_data in interval_data.get("targets", [])
         ]
 
         interval = WorkoutInterval(

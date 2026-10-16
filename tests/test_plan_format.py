@@ -63,6 +63,50 @@ class TestTargetValidation:
             WorkoutPlan(name="Empty", intervals=[])
 
 
+class TestProductionValidatorRules:
+    """Wahoo's production validator is stricter than the published schema."""
+
+    def test_untargeted_interval_gets_free_rpe_target(self):
+        plan = WorkoutPlan(
+            name="Free ride", intervals=[WorkoutInterval(duration=600, targets=[])]
+        )
+        targets = plan.to_wahoo_format(ftp=229)["intervals"][0]["targets"]
+        assert targets == [{"type": "rpe", "low": 1, "high": 10}]
+
+    def test_targets_may_be_omitted(self):
+        interval = WorkoutInterval(duration=600)
+        assert interval.targets == []
+
+    def test_free_target_is_not_shared_between_intervals(self):
+        plan = WorkoutPlan(
+            name="Free ride",
+            intervals=[WorkoutInterval(duration=600), WorkoutInterval(duration=300)],
+        )
+        intervals = plan.to_wahoo_format(ftp=229)["intervals"]
+        intervals[0]["targets"][0]["high"] = 5
+        assert intervals[1]["targets"][0]["high"] == 10
+
+    def test_missing_description_falls_back_to_name(self):
+        plan = _plan([WorkoutTarget(target_type="watts", target_value=135)])
+        assert plan.to_wahoo_format(ftp=229)["header"]["description"] == "Test"
+
+    def test_given_description_is_kept(self):
+        plan = _plan(
+            [WorkoutTarget(target_type="watts", target_value=135)],
+            description="Z2 Grundlage",
+        )
+        header = plan.to_wahoo_format(ftp=229)["header"]
+        assert header["description"] == "Z2 Grundlage"
+
+    def test_description_is_truncated_to_5000_characters(self):
+        plan = _plan(
+            [WorkoutTarget(target_type="watts", target_value=135)],
+            description="x" * 6000,
+        )
+        header = plan.to_wahoo_format(ftp=229)["header"]
+        assert len(header["description"]) == 5000
+
+
 class TestPlanHeader:
     def test_header_uses_given_ftp(self):
         plan = _plan([WorkoutTarget(target_type="watts", target_value=135)])

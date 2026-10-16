@@ -11,7 +11,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Description of the workout"
+          "description": "Description of the workout; defaults to the name because Wahoo rejects plans without one (max 5000 characters)"
         },
         "intervals": {
           "type": "array",
@@ -25,7 +25,7 @@
               },
               "targets": {
                 "type": "array",
-                "description": "List of targets for this interval",
+                "description": "List of targets for this interval. Only the first target is used on ELEMNT, so put power first. An empty list becomes a free RPE 1-10 target",
                 "items": {
                   "type": "object",
                   "properties": {
@@ -65,8 +65,7 @@
               }
             },
             "required": [
-              "duration",
-              "targets"
+              "duration"
             ]
           }
         },
