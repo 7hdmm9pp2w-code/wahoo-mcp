@@ -73,12 +73,12 @@ class TokenStore:
             # Ensure directory exists
             self.token_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # Write tokens to file
-            with open(self.token_file, "w") as f:
+            # Create the file owner-only from the start, so tokens are never
+            # readable by others, not even briefly
+            fd = os.open(self.token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)  # also tighten files that already existed
+            with os.fdopen(fd, "w") as f:
                 json.dump(token_data.to_dict(), f, indent=2)
-
-            # Set restrictive permissions (owner read/write only)
-            os.chmod(self.token_file, 0o600)
 
             logger.info(f"Saved tokens to file: {self.token_file}")
         except Exception as e:

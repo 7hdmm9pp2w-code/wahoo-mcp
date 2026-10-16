@@ -85,7 +85,8 @@ pip install -e ".[dev]"
    This will:
    - Use credentials from `.env` (or prompt if not set)
    - Open a browser for OAuth authentication
-   - Start a local server to receive the callback
+   - Receive the callback: with an `https://localhost/...` redirect URI (Wahoo requires https), paste the redirected URL from the browser's address bar into the terminal; otherwise a local callback server receives it
+   - Check the OAuth `state`, and use the client secret (confidential app) or PKCE (public app, no secret set), never both
    - Save your tokens to the file specified by `WAHOO_TOKEN_FILE`
    - Tokens will be automatically refreshed when needed
 
