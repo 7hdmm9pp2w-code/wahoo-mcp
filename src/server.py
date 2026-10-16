@@ -15,6 +15,7 @@ from mcp.types import TextContent, Tool
 from pydantic import BaseModel, Field
 
 from .models import (
+    WORKOUT_TYPE_HEADERS,
     CreatePlanRequest,
     CreatePlanResponse,
     Plan,
@@ -366,12 +367,42 @@ class WahooAPIClient:
             logger.error(f"Failed to parse plan {plan_id}: {e}")
             raise ValueError(f"Invalid plan data received from API: {e}") from e
 
+    async def resolve_ftp(self, workout_type: str = "bike") -> int:
+        """Resolve the FTP: WAHOO_FTP env var, else the user's power zones."""
+        env_ftp = os.getenv("WAHOO_FTP")
+        if env_ftp:
+            try:
+                ftp = int(env_ftp)
+            except ValueError as e:
+                raise ValueError(
+                    f"WAHOO_FTP must be an integer, got {env_ftp!r}"
+                ) from e
+            if ftp <= 0:
+                raise ValueError(f"WAHOO_FTP must be positive, got {ftp}")
+            return ftp
+
+        family, _ = WORKOUT_TYPE_HEADERS[workout_type]
+        zones = [
+            zone
+            for zone in await self.list_power_zones()
+            if zone.workout_type_family_id == family and zone.ftp > 0
+        ]
+        if not zones:
+            raise ValueError(
+                "No FTP available: set WAHOO_FTP, pass ftp, or configure power "
+                "zones in Wahoo"
+            )
+        return max(zones, key=lambda zone: zone.updated_at).ftp
+
     async def create_plan(self, plan_request: CreatePlanRequest) -> CreatePlanResponse:
         """Create a new plan in the user's library"""
         await self._ensure_valid_token()
 
+        plan = plan_request.plan
+        ftp = plan.ftp or await self.resolve_ftp(plan.workout_type)
+
         # Convert structured plan data to Wahoo plan JSON format
-        plan_json = plan_request.plan.to_wahoo_format()
+        plan_json = plan.to_wahoo_format(ftp)
 
         # Encode as base64
         plan_json_str = json.dumps(plan_json, separators=(",", ":"))
@@ -679,6 +710,7 @@ async def _handle_create_plan(
         description=plan_data.get("description"),
         intervals=intervals,
         workout_type=plan_data.get("workout_type", "bike"),
+        ftp=plan_data.get("ftp"),
         # Skip optional fields that cause Wahoo API validation errors:
         # - estimated_duration: calculated automatically from intervals
         # - estimated_tss: not accepted by API

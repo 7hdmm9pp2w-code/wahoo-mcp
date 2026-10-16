@@ -31,7 +31,7 @@
                   "properties": {
                     "target_type": {
                       "type": "string",
-                      "description": "Type of target: power, heart_rate, speed, pace, rpe, cadence, ftp, watts, hr, rpm"
+                      "description": "Type of target: watts (absolute, recommended), percent_ftp (fraction of FTP, e.g. 0.95, converted to watts), hr, rpm, rpe, speed, ftp, map, ac, nm, threshold_hr, threshold_speed, max_hr. Unknown types are rejected."
                     },
                     "target_value": {
                       "type": "number",
@@ -61,7 +61,7 @@
               },
               "interval_type": {
                 "type": "string",
-                "description": "Type of interval: work, rest, warmup, cooldown, tempo, threshold, recovery, active, or any Wahoo intensity type (wu, cd, lt, map, ac, nm, ftp, recover)"
+                "description": "Type of interval: work, rest, warmup, cooldown, tempo, threshold, recovery, active, or any Wahoo intensity type (wu, cd, lt, map, ac, nm, ftp, recover). Unknown types are rejected."
               }
             },
             "required": [
@@ -72,7 +72,12 @@
         },
         "workout_type": {
           "type": "string",
-          "description": "Type of workout: bike, run, swim"
+          "enum": ["bike", "bike_indoor", "bike_outdoor", "run", "run_outdoor", "run_indoor"],
+          "description": "Type of workout; sets the plan header family/location. bike = indoor bike"
+        },
+        "ftp": {
+          "type": "integer",
+          "description": "FTP in watts. Defaults to WAHOO_FTP or the FTP from the user's Wahoo power zones"
         }
       },
       "required": [

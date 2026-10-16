@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class WahooTarget(TypedDict):
@@ -521,13 +521,86 @@ Full JSON:
         return details
 
 
+# Wahoo plan JSON intensity types for intervals, with accepted aliases.
+INTENSITY_TYPE_ALIASES: dict[str, str] = {
+    "warmup": "wu",
+    "warm-up": "wu",
+    "wu": "wu",
+    "work": "active",
+    "active": "active",
+    "interval": "active",
+    "tempo": "tempo",
+    "threshold": "lt",
+    "lt": "lt",
+    "map": "map",
+    "ac": "ac",
+    "neuromuscular": "nm",
+    "nm": "nm",
+    "ftp": "ftp",
+    "cooldown": "cd",
+    "cool-down": "cd",
+    "cd": "cd",
+    "recovery": "recover",
+    "recover": "recover",
+    "rest": "rest",
+}
+
+# Wahoo plan JSON target types, with accepted aliases.
+TARGET_TYPE_ALIASES: dict[str, str] = {
+    "power": "watts",
+    "watts": "watts",
+    "heart_rate": "hr",
+    "hr": "hr",
+    "heartrate": "hr",
+    "cadence": "rpm",
+    "rpm": "rpm",
+    "rpe": "rpe",
+    "perceived_exertion": "rpe",
+    "speed": "speed",
+    "ftp": "ftp",
+    "map": "map",
+    "ac": "ac",
+    "nm": "nm",
+    "neuromuscular": "nm",
+    "threshold_hr": "threshold_hr",
+    "threshold_speed": "threshold_speed",
+    "max_hr": "max_hr",
+}
+
+# Converted to absolute watts by the server using the resolved FTP.
+PERCENT_FTP_TARGET = "percent_ftp"
+
+# Fractions above this are almost certainly percentages (95 instead of 0.95).
+MAX_FTP_FRACTION = 3.0
+
+# Plan header workout_type_family / workout_type_location per workout_type.
+WORKOUT_TYPE_HEADERS: dict[str, tuple[int, int]] = {
+    "bike": (0, 0),
+    "bike_indoor": (0, 0),
+    "bike_outdoor": (0, 1),
+    "run": (1, 1),
+    "run_outdoor": (1, 1),
+    "run_indoor": (1, 0),
+}
+
+
+def _normalize(value: str, aliases: dict[str, str], kind: str) -> str:
+    """Map an alias to its Wahoo value, raising on anything unknown."""
+    normalized = aliases.get(value.lower())
+    if normalized is None:
+        allowed = ", ".join(sorted(aliases))
+        raise ValueError(f"Unknown {kind} '{value}'. Allowed: {allowed}")
+    return normalized
+
+
 class WorkoutTarget(BaseModel):
     """Workout target specification"""
 
     target_type: str = Field(
         description=(
-            "Type of target: power, heart_rate, speed, pace, rpe, cadence, "
-            "ftp, watts, hr, rpm (mapped to Wahoo API types)"
+            "Type of target: watts/power, percent_ftp (fraction of FTP, "
+            "converted to watts), hr, rpm, rpe, speed, ftp, map, ac, nm, "
+            "threshold_hr, threshold_speed, max_hr"
         )
     )
     target_value: float | None = Field(None, description="Target value")
@@ -539,11 +612,53 @@ class WorkoutTarget(BaseModel):
     )
     unit: str | None = Field(None, description="Unit of measurement")
 
+    @field_validator("target_type")
+    @classmethod
+    def _check_target_type(cls, value: str) -> str:
+        if value.lower() != PERCENT_FTP_TARGET:
+            _normalize(value, TARGET_TYPE_ALIASES, "target type")
+        return value
+
+    @model_validator(mode="after")
+    def _check_values(self) -> "WorkoutTarget":
+        has_range = self.target_min is not None or self.target_max is not None
+        if has_range and (self.target_min is None or self.target_max is None):
+            raise ValueError("target_min and target_max must be given together")
+        if not has_range and self.target_value is None:
+            raise ValueError("target needs target_value or target_min/target_max")
+        if has_range and self.target_min > self.target_max:
+            raise ValueError("target_min must not exceed target_max")
+        if self.target_type.lower() == PERCENT_FTP_TARGET:
+            for value in (self.target_value, self.target_min, self.target_max):
+                if value is not None and not 0 < value <= MAX_FTP_FRACTION:
+                    raise ValueError(
+                        f"percent_ftp expects a fraction of FTP (e.g. 0.95), "
+                        f"got {value}"
+                    )
+        return self
+
+    def bounds(self) -> tuple[float, float]:
+        """Return (low, high) for this target."""
+        if self.target_min is not None and self.target_max is not None:
+            return self.target_min, self.target_max
+        return self.target_value, self.target_value
+
+    def to_wahoo_format(self, ftp: int) -> WahooTarget:
+        """Convert to a Wahoo plan target, resolving percent_ftp to watts."""
+        low, high = self.bounds()
+        if self.target_type.lower() == PERCENT_FTP_TARGET:
+            return {"type": "watts", "low": round(low * ftp), "high": round(high * ftp)}
+        return {
+            "type": _normalize(self.target_type, TARGET_TYPE_ALIASES, "target type"),
+            "low": low,
+            "high": high,
+        }
+
 
 class WorkoutInterval(BaseModel):
     """Individual workout interval"""
 
-    duration: int = Field(description="Duration in seconds")
+    duration: int = Field(gt=0, description="Duration in seconds")
     targets: list[WorkoutTarget] = Field(
         description="List of targets for this interval"
     )
@@ -557,15 +672,32 @@ class WorkoutInterval(BaseModel):
         ),
     )
 
+    @field_validator("interval_type")
+    @classmethod
+    def _check_interval_type(cls, value: str) -> str:
+        _normalize(value, INTENSITY_TYPE_ALIASES, "interval type")
+        return value
+
 
 class WorkoutPlan(BaseModel):
     """Complete workout plan structure"""
 
     name: str = Field(description="Name of the workout plan")
     description: str | None = Field(None, description="Description of the workout")
-    intervals: list[WorkoutInterval] = Field(description="List of workout intervals")
+    intervals: list[WorkoutInterval] = Field(
+        min_length=1, description="List of workout intervals"
+    )
     workout_type: str = Field(
-        default="bike", description="Type of workout: bike, run, swim"
+        default="bike",
+        description=(
+            "Type of workout: bike (indoor), bike_indoor, bike_outdoor, "
+            "run (outdoor), run_outdoor, run_indoor"
+        ),
+    )
+    ftp: int | None = Field(
+        None,
+        gt=0,
+        description="FTP in watts for the plan header and percent_ftp targets",
     )
     estimated_duration: int | None = Field(
         None, description="Estimated total duration in seconds"
@@ -575,139 +707,60 @@ class WorkoutPlan(BaseModel):
     )
     author: str | None = Field(None, description="Author of the plan")
 
-    def _map_intensity_type(self, interval_type: str) -> str:
-        """Map generic interval types to Wahoo-specific intensity types."""
-        # Wahoo API expects:
-        # ["active","wu","tempo","lt","map","ac","nm","ftp","cd","recover","rest"]
-        intensity_mapping = {
-            "warmup": "wu",
-            "warm-up": "wu",
-            "wu": "wu",
-            "work": "active",
-            "active": "active",
-            "interval": "active",
-            "tempo": "tempo",
-            "threshold": "lt",
-            "lt": "lt",
-            "map": "map",
-            "ac": "ac",
-            "neuromuscular": "nm",
-            "nm": "nm",
-            "ftp": "ftp",
-            "cooldown": "cd",
-            "cool-down": "cd",
-            "cd": "cd",
-            "recovery": "recover",
-            "recover": "recover",
-            "rest": "rest",
-        }
+    @field_validator("workout_type")
+    @classmethod
+    def _check_workout_type(cls, value: str) -> str:
+        value = value.lower()
+        if value not in WORKOUT_TYPE_HEADERS:
+            allowed = ", ".join(WORKOUT_TYPE_HEADERS)
+            raise ValueError(f"Unknown workout type '{value}'. Allowed: {allowed}")
+        return value
 
-        # Convert to lowercase for case-insensitive matching
-        interval_type_lower = interval_type.lower()
-        return intensity_mapping.get(
-            interval_type_lower, "active"
-        )  # Default to "active"
+    def total_duration(self) -> int:
+        """Total duration in seconds."""
+        if self.estimated_duration is not None:
+            return self.estimated_duration
+        return sum(interval.duration for interval in self.intervals)
 
-    def _map_target_type(self, target_type: str) -> str:
-        """Map generic target types to Wahoo-specific target types."""
-        # Wahoo API expects:
-        # ["rpm","rpe","watts","hr","speed","ftp","map","ac",
-        # "nm","threshold_hr","threshold_speed","max_hr"]
-        target_mapping = {
-            "power": "watts",
-            "watts": "watts",
-            "heart_rate": "hr",
-            "hr": "hr",
-            "heartrate": "hr",
-            "cadence": "rpm",
-            "rpm": "rpm",
-            "rpe": "rpe",
-            "perceived_exertion": "rpe",
-            "speed": "speed",
-            "pace": "speed",
-            "ftp": "ftp",
-            "map": "map",
-            "ac": "ac",
-            "nm": "nm",
-            "neuromuscular": "nm",
-            "threshold_hr": "threshold_hr",
-            "threshold_speed": "threshold_speed",
-            "max_hr": "max_hr",
-        }
+    def to_wahoo_format(self, ftp: int | None = None) -> WahooPlan:
+        """Convert to Wahoo plan JSON format.
 
-        # Convert to lowercase for case-insensitive matching
-        target_type_lower = target_type.lower()
-        return target_mapping.get(target_type_lower, "watts")  # Default to "watts"
+        ``ftp`` overrides ``self.ftp``. One of them is required because the
+        header needs it and percent_ftp targets are converted with it.
+        """
+        ftp = ftp or self.ftp
+        if not ftp:
+            raise ValueError("FTP is required to build a Wahoo plan")
 
-    def to_wahoo_format(self) -> WahooPlan:
-        """Convert to Wahoo plan JSON format"""
-
-        # Calculate total duration if not provided
-        total_duration = self.estimated_duration
-        if total_duration is None:
-            total_duration = sum(interval.duration for interval in self.intervals)
-
-        # Convert intervals to Wahoo format
         wahoo_intervals: list[WahooInterval] = []
         for interval in self.intervals:
             wahoo_interval: WahooInterval = {
-                "targets": [],
+                "targets": [target.to_wahoo_format(ftp) for target in interval.targets],
                 "exit_trigger_type": "time",
                 "exit_trigger_value": interval.duration,
-                "intensity_type": self._map_intensity_type(interval.interval_type),
+                "intensity_type": _normalize(
+                    interval.interval_type, INTENSITY_TYPE_ALIASES, "interval type"
+                ),
             }
-
-            # Add interval name/description if provided
             if interval.name:
                 wahoo_interval["name"] = interval.name
-
-            # Convert targets to Wahoo format
-            for target in interval.targets:
-                # Map target types to Wahoo-specific types
-                wahoo_target_type = self._map_target_type(target.target_type)
-
-                # Add target values based on whether it's a range or single value
-                if target.target_min is not None and target.target_max is not None:
-                    wahoo_target: WahooTarget = {
-                        "type": wahoo_target_type,
-                        "low": target.target_min,
-                        "high": target.target_max,
-                    }
-                elif target.target_value is not None:
-                    # Use value as both low and high for single values
-                    wahoo_target: WahooTarget = {
-                        "type": wahoo_target_type,
-                        "low": target.target_value,
-                        "high": target.target_value,
-                    }
-                else:
-                    # Skip targets without valid values
-                    continue
-
-                wahoo_interval["targets"].append(wahoo_target)
-
             wahoo_intervals.append(wahoo_interval)
 
-        # Build the complete Wahoo plan JSON structure
+        family, location = WORKOUT_TYPE_HEADERS[self.workout_type]
         header: WahooHeader = {
             "name": self.name,
             "description": self.description or "",
             "version": "1.0.0",
-            "workout_type_family": 0,  # 0 = cycling, 1 = running
-            "workout_type_location": 0,  # 0 = indoor, 1 = outdoor
-            "ftp": 250,  # Default FTP value for target calculations
+            "workout_type_family": family,
+            "workout_type_location": location,
+            "ftp": ftp,
         }
 
         # Skip optional fields that cause Wahoo API validation errors:
         # - author: causes "field 'author' is not an allowed field" error
         # - estimated_tss: causes "field 'estimated_tss' is not an allowed field" error
 
-        wahoo_plan: WahooPlan = {
-            "header": header,
-            "intervals": wahoo_intervals,
-        }
-
-        return wahoo_plan
+        return {"header": header, "intervals": wahoo_intervals}
 
 
 class CreatePlanRequest(BaseModel):

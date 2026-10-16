@@ -1,8 +1,11 @@
+import base64
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs
 
 import pytest
+from pydantic import ValidationError
 
 from src.models import (
     CreatePlanRequest,
@@ -392,6 +395,7 @@ class TestWahooAPIClient:
         self, wahoo_config, temp_token_file, monkeypatch, httpx_mock
     ):
         monkeypatch.setenv("WAHOO_TOKEN_FILE", temp_token_file)
+        monkeypatch.setenv("WAHOO_FTP", "229")
 
         # Mock response for plan creation
         mock_create_response = {
@@ -456,6 +460,16 @@ class TestWahooAPIClient:
             request = httpx_mock.get_requests()[0]
             assert request.method == "POST"
             assert "/v1/plans" in str(request.url)
+
+            form = parse_qs(request.content.decode())
+            data_uri = form["plan[file]"][0]
+            plan_json = json.loads(base64.b64decode(data_uri.split(",", 1)[1]))
+            assert plan_json["header"]["ftp"] == 229
+            assert plan_json["intervals"][0]["targets"][0] == {
+                "type": "watts",
+                "low": 200,
+                "high": 250,
+            }
 
     @pytest.mark.asyncio
     async def test_list_power_zones(
@@ -787,7 +801,7 @@ class TestIntensityTypeMapping:
         )
 
         # Convert to Wahoo format
-        wahoo_plan = plan.to_wahoo_format()
+        wahoo_plan = plan.to_wahoo_format(ftp=229)
 
         # Verify intensity types are correctly mapped
         intervals = wahoo_plan["intervals"]
@@ -816,29 +830,20 @@ class TestIntensityTypeMapping:
             ],
         )
 
-        wahoo_plan = plan.to_wahoo_format()
+        wahoo_plan = plan.to_wahoo_format(ftp=229)
         intervals = wahoo_plan["intervals"]
 
         assert intervals[0]["intensity_type"] == "active"
         assert intervals[1]["intensity_type"] == "wu"
 
-    def test_unknown_intensity_type_defaults_to_active(self):
-        """Test that unknown intensity types default to 'active'."""
-        plan = WorkoutPlan(
-            name="Test Plan",
-            intervals=[
-                WorkoutInterval(
-                    duration=300,
-                    targets=[WorkoutTarget(target_type="power", target_value=200)],
-                    interval_type="unknown_type",  # Should default to "active"
-                ),
-            ],
-        )
-
-        wahoo_plan = plan.to_wahoo_format()
-        intervals = wahoo_plan["intervals"]
-
-        assert intervals[0]["intensity_type"] == "active"
+    def test_unknown_intensity_type_is_rejected(self):
+        """Unknown intensity types raise instead of silently becoming 'active'."""
+        with pytest.raises(ValidationError, match="Unknown interval type"):
+            WorkoutInterval(
+                duration=300,
+                targets=[WorkoutTarget(target_type="power", target_value=200)],
+                interval_type="unknown_type",
+            )
 
     def test_target_type_mapping(self):
         """Test that target types are correctly mapped to Wahoo target types."""
@@ -863,7 +868,7 @@ class TestIntensityTypeMapping:
             ],
         )
 
-        wahoo_plan = plan.to_wahoo_format()
+        wahoo_plan = plan.to_wahoo_format(ftp=229)
         targets = wahoo_plan["intervals"][0]["targets"]
 
         assert len(targets) == 3
@@ -884,27 +889,12 @@ class TestIntensityTypeMapping:
             ],
         )
 
-        wahoo_plan = plan.to_wahoo_format()
+        wahoo_plan = plan.to_wahoo_format(ftp=229)
         targets = wahoo_plan["intervals"][0]["targets"]
 
         assert targets[0]["type"] == "watts"
 
-    def test_unknown_target_type_defaults_to_watts(self):
-        """Test that unknown target types default to 'watts'."""
-        plan = WorkoutPlan(
-            name="Test Plan",
-            intervals=[
-                WorkoutInterval(
-                    duration=300,
-                    targets=[
-                        WorkoutTarget(target_type="unknown_type", target_value=200)
-                    ],
-                    interval_type="work",
-                ),
-            ],
-        )
-
-        wahoo_plan = plan.to_wahoo_format()
-        targets = wahoo_plan["intervals"][0]["targets"]
-
-        assert targets[0]["type"] == "watts"
+    def test_unknown_target_type_is_rejected(self):
+        """Unknown target types raise instead of silently becoming 'watts'."""
+        with pytest.raises(ValidationError, match="Unknown target type"):
+            WorkoutTarget(target_type="unknown_type", target_value=200)
