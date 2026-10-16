@@ -4,9 +4,11 @@ Pydantic models for Wahoo API data structures
 """
 
 import json
-from datetime import datetime
+import os
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any, TypedDict
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -774,6 +776,81 @@ class CreatePlanRequest(BaseModel):
     )
 
 
+# Wahoo only syncs a planned workout to ELEMNT / KICKR when it starts between
+# today and six days from today.
+SCHEDULE_WINDOW_DAYS = 6
+BIKING_INDOOR_WORKOUT_TYPE_ID = 12
+DEFAULT_TIMEZONE = "Europe/Berlin"
+
+
+def local_timezone() -> ZoneInfo:
+    """Timezone for naive start times and the scheduling window."""
+    return ZoneInfo(os.getenv("WAHOO_TIMEZONE", DEFAULT_TIMEZONE))
+
+
+def check_schedule_window(starts: datetime, today: date | None = None) -> None:
+    """Raise if ``starts`` lies outside today .. today + SCHEDULE_WINDOW_DAYS."""
+    tz = local_timezone()
+    today = today or datetime.now(tz).date()
+    start_day = starts.astimezone(tz).date()
+    last_day = today + timedelta(days=SCHEDULE_WINDOW_DAYS)
+    if not today <= start_day <= last_day:
+        raise ValueError(
+            f"Workout date {start_day} is outside the Wahoo sync window "
+            f"{today} .. {last_day}; the ELEMNT and KICKR only receive "
+            f"workouts scheduled for today through {SCHEDULE_WINDOW_DAYS} days ahead"
+        )
+
+
+class CreateWorkoutRequest(BaseModel):
+    """Request model for scheduling a workout (POST /v1/workouts)"""
+
+    name: str = Field(min_length=1, description="Workout name")
+    starts: datetime = Field(
+        description="Start time; naive values are read in WAHOO_TIMEZONE"
+    )
+    minutes: int = Field(gt=0, description="Planned duration in minutes")
+    workout_token: str = Field(
+        min_length=1, description="Application-specific identifier"
+    )
+    workout_type_id: int = Field(
+        default=BIKING_INDOOR_WORKOUT_TYPE_ID,
+        description="Wahoo workout type ID (12 = indoor biking)",
+    )
+    plan_id: int | None = Field(None, description="Plan to attach")
+    route_id: int | None = Field(None, description="Route to attach")
+
+    @field_validator("starts")
+    @classmethod
+    def _localize(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=local_timezone())
+        return value
+
+    @field_validator("workout_type_id")
+    @classmethod
+    def _check_workout_type_id(cls, value: int) -> int:
+        if WorkoutType.from_id(value) is WorkoutType.UNKNOWN:
+            raise ValueError(f"Unknown workout_type_id {value}")
+        return value
+
+    def to_form_data(self) -> dict[str, str]:
+        """Form-encoded body as documented for POST/PUT /v1/workouts."""
+        starts_utc = self.starts.astimezone(ZoneInfo("UTC"))
+        data = {
+            "workout[name]": self.name,
+            "workout[workout_token]": self.workout_token,
+            "workout[workout_type_id]": str(self.workout_type_id),
+            "workout[starts]": starts_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "workout[minutes]": str(self.minutes),
+        }
+        if self.plan_id is not None:
+            data["workout[plan_id]"] = str(self.plan_id)
+        if self.route_id is not None:
+            data["workout[route_id]"] = str(self.route_id)
+        return data
+
+
 class CreatePlanResponse(BaseModel):
     """Response model for plan creation"""
 
@@ -868,6 +945,7 @@ class Workout(BaseModel):
     minutes: int = Field(description="Workout duration in minutes")
     name: str = Field(description="Workout name")
     plan_id: int | None = Field(None, description="Associated plan ID")
+    plan_ids: list[int] | None = Field(None, description="Associated plan IDs")
     route_id: int | None = Field(None, description="Associated route ID")
     workout_token: str = Field(description="Application-specific identifier")
     workout_type_id: int = Field(description="Type of workout")

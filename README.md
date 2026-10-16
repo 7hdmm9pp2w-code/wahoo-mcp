@@ -107,6 +107,12 @@ The auth server can be configured via environment variables:
 - `WAHOO_CLIENT_SECRET`: Your Wahoo Client Secret
 - `WAHOO_TOKEN_FILE`: Path to store OAuth tokens (required)
 
+**Plans and scheduling:**
+- `WAHOO_FTP`: FTP in watts for plan headers and `percent_ftp` targets. If unset, the FTP is read from your Wahoo power zones.
+- `WAHOO_TIMEZONE`: Timezone for start times without an offset and for the 6-day sync window (default: `Europe/Berlin`)
+
+**Scopes:** the server requests `workouts_write` to schedule workouts. Tokens created before this change lack it: run `make auth` again.
+
 **Example Configurations:**
 
 1. **Local Development (default):**
@@ -275,10 +281,11 @@ Parameters:
   - `description` (optional): Description of the workout
   - `intervals` (required): List of workout intervals, each containing:
     - `duration` (required): Duration in seconds
-    - `targets` (required): List of targets (power, heart_rate, speed, pace, rpe, cadence)
+    - `targets` (required): List of targets. Use `watts` for absolute power (recommended) or `percent_ftp` with a fraction (e.g. `0.95`), which is converted to watts. Also: hr, rpm, rpe, speed and the Wahoo relative types ftp, map, ac, nm. Each target needs `target_value` or `target_min` + `target_max`.
     - `name` (optional): Name/description of the interval
     - `interval_type` (optional): Type (work, rest, warmup, cooldown, tempo, threshold, recovery, active, or Wahoo types: wu, cd, lt, map, ac, nm, ftp, recover)
-  - `workout_type` (optional): Type of workout (bike, run, swim) - defaults to "bike"
+  - `workout_type` (optional): bike (indoor, default), bike_indoor, bike_outdoor, run (outdoor), run_outdoor, run_indoor. Sets the plan header family and location.
+  - `ftp` (optional): FTP in watts; defaults to `WAHOO_FTP` or your Wahoo power zones
   - `estimated_duration` (optional): Estimated total duration in seconds
   - `estimated_tss` (optional): Estimated Training Stress Score
   - `author` (optional): Author of the plan
@@ -286,9 +293,29 @@ Parameters:
 - `provider_updated_at` (required): External date/time the file was updated (ISO 8601 format)
 - `filename` (optional): Name of the plan file
 
+Unknown target or interval types are rejected instead of being silently converted.
+
 Example:
 ```
 Use the create_plan tool to create a new training plan with intervals for power and heart rate zones
+```
+
+#### schedule_workout
+Schedule a workout on your Wahoo calendar and attach a plan, so it shows up on the ELEMNT and KICKR.
+
+Parameters:
+- `name` (required): Workout name
+- `starts` (required): ISO 8601 start time; without an offset it is read in `WAHOO_TIMEZONE`
+- `minutes` (required): Planned duration in minutes
+- `plan_id` (optional): Plan to attach (from `create_plan` or `list_plans`)
+- `route_id` (optional): Route to attach
+- `workout_type_id` (optional): defaults to 12 (indoor biking)
+- `workout_token` (optional): your own identifier; generated if omitted
+- `allow_outside_window` (optional): Wahoo only syncs workouts starting today through 6 days ahead to devices. Other dates are rejected unless this is `true`.
+
+Example:
+```
+Create the plan "Test Z2 30 min" and schedule it for tomorrow at 18:00
 ```
 
 ## Development

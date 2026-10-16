@@ -530,7 +530,7 @@ class TestMCPTools:
     async def test_list_tools(self):
         # The list_tools decorator creates a handler, we need to call it directly
         tools = await list_tools()
-        assert len(tools) == 9
+        assert len(tools) == 10
 
         tool_names = [tool.name for tool in tools]
         expected_tools = [
@@ -541,6 +541,7 @@ class TestMCPTools:
             "list_plans",
             "get_plan",
             "create_plan",
+            "schedule_workout",
             "list_power_zones",
             "get_power_zone",
         ]

@@ -20,6 +20,7 @@ import httpx
 from aiohttp import web
 from dotenv import load_dotenv
 
+from src.scopes import OAUTH_SCOPES
 from src.token_store import TokenData, TokenStore
 
 # Load environment variables
@@ -296,10 +297,7 @@ async def start_server():
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
-        "scope": (
-            "user_read workouts_read routes_read plans_read "
-            "plans_write power_zones_read"
-        ),
+        "scope": OAUTH_SCOPES,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
