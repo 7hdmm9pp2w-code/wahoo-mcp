@@ -37,7 +37,8 @@ Live gefunden am 17.10.2026, in keinem der anderen Projekte dokumentiert:
 - Der ELEMNT ROAM lädt einen Plan nur neu, wenn sich das **Workout** ändert (dessen `updated_at`). Ein per PUT ersetzter Plan allein bleibt auf dem Gerät auf der alten Fassung, auch nach mehrfachem Sync.
 - Wahoo setzt `updated_at` eines Workouts bei einem PUT ohne inhaltliche Änderung **nicht** neu.
 - Lösung: Wird ein Plan ersetzt und das Workout bliebe gleich, verschiebt der Server den Start um eine Sekunde (wechselnd :00 ↔ :01). `push_session` macht das automatisch. `create_plan` fasst beim Ersetzen alle kommenden, nicht gefahrenen Workouts mit diesem Plan so an (1 GET + 1 PUT pro Workout).
-- Der zuerst vermutete Grund (Repeat-Block, RPE-Ziel) war es nicht: v4 mit Repeat-Block erschien sofort, nachdem das Workout geändert wurde.
+- Der zuerst vermutete Grund (Repeat-Block, RPE-Ziel) war es nicht: v4 mit Repeat-Block erschien sofort, nachdem das Workout geändert wurde. v5 mit Repeat-Block und freiem RPE-Ausfahren kam mit dem 1-Sekunden-Trick ohne Zutun an (17.10.2026, 17:57).
+- Der ROAM rechnet ein RPE-Ziel offenbar mit 0 W in IF und TSS ein (v5: IF 0,55, TSS 15). Wie sich der KICKR im ERG-Modus während eines RPE-Abschnitts verhält, ist ungetestet.
 
 ## Workouts ändern und löschen (AP 5) ✅
 
