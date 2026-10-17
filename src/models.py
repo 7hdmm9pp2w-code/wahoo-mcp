@@ -634,21 +634,28 @@ class WorkoutTarget(BaseModel):
 
     @model_validator(mode="after")
     def _check_values(self) -> "WorkoutTarget":
-        has_range = self.target_min is not None or self.target_max is not None
-        if has_range and (self.target_min is None or self.target_max is None):
-            raise ValueError("target_min and target_max must be given together")
-        if not has_range and self.target_value is None:
-            raise ValueError("target needs target_value or target_min/target_max")
-        if has_range and self.target_min > self.target_max:
-            raise ValueError("target_min must not exceed target_max")
+        self._check_bounds()
         if self.target_type.lower() == PERCENT_FTP_TARGET:
-            for value in (self.target_value, self.target_min, self.target_max):
-                if value is not None and not 0 < value <= MAX_FTP_FRACTION:
-                    raise ValueError(
-                        f"percent_ftp expects a fraction of FTP (e.g. 0.95), "
-                        f"got {value}"
-                    )
+            self._check_ftp_fractions()
         return self
+
+    def _check_bounds(self) -> None:
+        has_range = self.target_min is not None or self.target_max is not None
+        if not has_range:
+            if self.target_value is None:
+                raise ValueError("target needs target_value or target_min/target_max")
+            return
+        if self.target_min is None or self.target_max is None:
+            raise ValueError("target_min and target_max must be given together")
+        if self.target_min > self.target_max:
+            raise ValueError("target_min must not exceed target_max")
+
+    def _check_ftp_fractions(self) -> None:
+        for value in (self.target_value, self.target_min, self.target_max):
+            if value is not None and not 0 < value <= MAX_FTP_FRACTION:
+                raise ValueError(
+                    f"percent_ftp expects a fraction of FTP (e.g. 0.95), got {value}"
+                )
 
     def bounds(self) -> tuple[float, float]:
         """Return (low, high) for this target."""
