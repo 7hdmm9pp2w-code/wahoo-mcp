@@ -24,7 +24,6 @@ class WahooTarget(TypedDict):
 class WahooIntervalRequired(TypedDict):
     """Required fields for Wahoo plan interval format."""
 
-    targets: list[WahooTarget]
     exit_trigger_type: str
     exit_trigger_value: int
     intensity_type: str
@@ -34,6 +33,8 @@ class WahooInterval(WahooIntervalRequired, total=False):
     """TypedDict for Wahoo plan interval format with optional fields."""
 
     name: str  # Optional field
+    targets: list[WahooTarget]  # Not allowed on repeat intervals
+    intervals: list["WahooInterval"]  # Only on repeat intervals
 
 
 class WahooHeaderRequired(TypedDict):
@@ -579,6 +580,9 @@ MAX_FTP_FRACTION = 3.0
 # published plan schema marks them optional. Untargeted steps get a free RPE.
 FREE_TARGET: WahooTarget = {"type": "rpe", "low": 1, "high": 10}
 
+# Upper bound for repeat blocks, catching typos such as 40 instead of 4.
+MAX_REPEAT = 30
+
 # Wahoo also rejects a missing header description; it allows 5000 characters.
 MAX_DESCRIPTION_LENGTH = 5000
 
@@ -665,9 +669,11 @@ class WorkoutTarget(BaseModel):
 
 
 class WorkoutInterval(BaseModel):
-    """Individual workout interval"""
+    """Individual workout interval, or a repeat block of nested intervals"""
 
-    duration: int = Field(gt=0, description="Duration in seconds")
+    duration: int | None = Field(
+        None, gt=0, description="Duration in seconds (not for repeat blocks)"
+    )
     targets: list[WorkoutTarget] = Field(
         default_factory=list,
         description="List of targets; an empty list becomes a free RPE 1-10 target",
@@ -681,12 +687,66 @@ class WorkoutInterval(BaseModel):
             "recover)"
         ),
     )
+    repeat: int | None = Field(
+        None,
+        ge=2,
+        le=MAX_REPEAT,
+        description="Run the nested intervals this many times in total",
+    )
+    intervals: list["WorkoutInterval"] | None = Field(
+        None, description="Nested intervals of a repeat block"
+    )
 
     @field_validator("interval_type")
     @classmethod
     def _check_interval_type(cls, value: str) -> str:
         _normalize(value, INTENSITY_TYPE_ALIASES, "interval type")
         return value
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> "WorkoutInterval":
+        if self.repeat is None:
+            if self.intervals is not None:
+                raise ValueError("nested intervals need repeat")
+            if self.duration is None:
+                raise ValueError("interval needs a duration")
+            return self
+        if not self.intervals:
+            raise ValueError("repeat block needs nested intervals")
+        if self.duration is not None or self.targets:
+            raise ValueError("repeat block takes no duration or targets")
+        return self
+
+    def total_duration(self) -> int:
+        """Duration in seconds, counting every pass of a repeat block."""
+        if self.repeat is None:
+            return self.duration
+        return self.repeat * sum(child.total_duration() for child in self.intervals)
+
+    def to_wahoo_format(self, ftp: int) -> WahooInterval:
+        """Convert to a Wahoo plan interval."""
+        intensity = _normalize(
+            self.interval_type, INTENSITY_TYPE_ALIASES, "interval type"
+        )
+        if self.repeat is not None:
+            # Wahoo counts the repeats after the first pass
+            wahoo_interval: WahooInterval = {
+                "exit_trigger_type": "repeat",
+                "exit_trigger_value": self.repeat - 1,
+                "intensity_type": intensity,
+                "intervals": [child.to_wahoo_format(ftp) for child in self.intervals],
+            }
+        else:
+            wahoo_interval = {
+                "targets": [target.to_wahoo_format(ftp) for target in self.targets]
+                or [dict(FREE_TARGET)],
+                "exit_trigger_type": "time",
+                "exit_trigger_value": self.duration,
+                "intensity_type": intensity,
+            }
+        if self.name:
+            wahoo_interval["name"] = self.name
+        return wahoo_interval
 
 
 class WorkoutPlan(BaseModel):
@@ -730,7 +790,7 @@ class WorkoutPlan(BaseModel):
         """Total duration in seconds."""
         if self.estimated_duration is not None:
             return self.estimated_duration
-        return sum(interval.duration for interval in self.intervals)
+        return sum(interval.total_duration() for interval in self.intervals)
 
     def to_wahoo_format(self, ftp: int | None = None) -> WahooPlan:
         """Convert to Wahoo plan JSON format.
@@ -742,20 +802,7 @@ class WorkoutPlan(BaseModel):
         if not ftp:
             raise ValueError("FTP is required to build a Wahoo plan")
 
-        wahoo_intervals: list[WahooInterval] = []
-        for interval in self.intervals:
-            wahoo_interval: WahooInterval = {
-                "targets": [target.to_wahoo_format(ftp) for target in interval.targets]
-                or [dict(FREE_TARGET)],
-                "exit_trigger_type": "time",
-                "exit_trigger_value": interval.duration,
-                "intensity_type": _normalize(
-                    interval.interval_type, INTENSITY_TYPE_ALIASES, "interval type"
-                ),
-            }
-            if interval.name:
-                wahoo_interval["name"] = interval.name
-            wahoo_intervals.append(wahoo_interval)
+        wahoo_intervals = [interval.to_wahoo_format(ftp) for interval in self.intervals]
 
         family, location = WORKOUT_TYPE_HEADERS[self.workout_type]
         header: WahooHeader = {

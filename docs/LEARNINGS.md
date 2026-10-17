@@ -48,9 +48,9 @@ Status: ✅ umgesetzt, ⏳ offen (Arbeitspaket in Klammern).
 - `day_code` weglassen: Doku und Beispiele widersprechen sich beim Bezugsdatum. *(quantified-self)*
 - ⏳ Einheiten, die weiter als 6 Tage entfernt sind, später pushen statt ablehnen. gradientpeak legt dafür eine Queue mit `runAt = start − 6 Tage` an. Für uns reicht, dass der Planer bzw. der Morgenlauf täglich die nächsten 7 Tage pusht. *(gradientpeak, quantified-self)*
 
-## Plan-JSON (AP 6) ⏳
+## Plan-JSON (AP 6) ✅
 
-- **Wiederholungen als `repeat`-Intervall** mit Kind-`intervals` und `exit_trigger_value = Anzahl − 1` (Wahoo wiederholt *nach* dem ersten Durchlauf). Nicht ausrollen. Gesamtdauer muss alle Durchläufe zählen. *(gradientpeak, AiWattCoach, quantified-self; Gegenbeispiel FitSync)*
+- **Wiederholungen als `repeat`-Intervall** mit Kind-`intervals` und `exit_trigger_value = Anzahl − 1` (Wahoo wiederholt *nach* dem ersten Durchlauf). Nicht ausrollen. Gesamtdauer muss alle Durchläufe zählen. *(gradientpeak, AiWattCoach, quantified-self; Gegenbeispiel FitSync)* Umgesetzt und live von Wahoo angenommen am 17.10.2026.
 - Absolute Watt (unser Standard) vs. relative `ftp`-Ziele: Relative Ziele passen sich an, wenn sich die FTP am Gerät ändert. Absolute Watt sind eindeutig und entsprechen dem Planer. Wir bleiben bei absoluten Watt und rechnen `percent_ftp` serverseitig um.
 - gradientpeak gibt Einzelwerten ±5 % Spielraum (`low = 0,95 × Wert`, `high = 1,05 × Wert`). Für ERG am KICKR ist ein fester Wert besser. Bei uns bleibt `low == high`, wenn nur `target_value` kommt.
 

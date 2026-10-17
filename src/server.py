@@ -6,6 +6,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from .models import (
     WorkoutTarget,
     check_schedule_window,
 )
+from .session import Session, describe_watts
 from .token_store import TokenStore
 
 # Type aliases for cleaner function signatures
@@ -767,6 +769,17 @@ async def list_tools() -> list[Tool]:
             inputSchema=load_json_schema("schedule_workout.json"),
         ),
         Tool(
+            name="push_session",
+            description=(
+                "Push one planner session to Wahoo in one step: converts % FTP "
+                "to watts, creates or replaces the plan and schedules or updates "
+                "the workout. The ID pbp-<date>-<name> makes a repeated push "
+                "replace instead of duplicate. Date must be today through 6 "
+                "days ahead."
+            ),
+            inputSchema=load_json_schema("push_session.json"),
+        ),
+        Tool(
             name="delete_workout",
             description=(
                 "Delete a scheduled workout by workout_id or workout_token. "
@@ -874,12 +887,17 @@ def _build_workout_intervals(intervals_data: list) -> list[WorkoutInterval]:
             WorkoutTarget(**target_data)
             for target_data in interval_data.get("targets", [])
         ]
+        nested = interval_data.get("intervals")
 
         interval = WorkoutInterval(
-            duration=interval_data["duration"],
+            duration=interval_data.get("duration"),
             targets=targets,
             name=interval_data.get("name"),
-            interval_type=interval_data.get("interval_type", "work"),
+            interval_type=interval_data.get(
+                "interval_type", "active" if nested else "work"
+            ),
+            repeat=interval_data.get("repeat"),
+            intervals=_build_workout_intervals(nested) if nested else None,
         )
         intervals.append(interval)
     return intervals
@@ -971,6 +989,56 @@ async def _handle_schedule_workout(
     ]
 
 
+async def _handle_push_session(
+    client: WahooAPIClient, arguments: Arguments
+) -> ToolResponse:
+    """Handle push_session: build the plan, replace or create it, schedule it."""
+    arguments = dict(arguments)
+    allow_outside_window = arguments.pop("allow_outside_window", False)
+    session = Session(**arguments)
+    starts = session.starts()
+    # Check everything that can fail locally before the first API request
+    if not allow_outside_window:
+        check_schedule_window(starts)
+    plan = session.to_plan()
+    sid = session.id()
+
+    ftp = plan.ftp or await client.resolve_ftp(plan.workout_type)
+    plan = plan.model_copy(update={"ftp": ftp})
+    plan_json = plan.to_wahoo_format(ftp)
+
+    plan_action, created_plan = await client.upsert_plan(
+        CreatePlanRequest(
+            plan=plan,
+            filename=f"{sid}.json",
+            external_id=sid,
+            provider_updated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    )
+    workout_action, workout = await client.upsert_workout(
+        CreateWorkoutRequest(
+            name=session.name,
+            starts=starts,
+            minutes=session.minutes(plan),
+            workout_token=sid,
+            workout_type_id=session.workout_type_id,
+            plan_id=created_plan.id,
+        )
+    )
+
+    plan_verb = "replaced" if plan_action == "updated" else "created"
+    workout_verb = "updated" if workout_action == "updated" else "scheduled"
+    text = f"""Session pushed: {session.name}
+- Start: {starts:%Y-%m-%d %H:%M} ({starts.tzinfo}), {session.minutes(plan)} min
+- ID: {sid}
+- Plan {created_plan.id} {plan_verb}, workout {workout.id} {workout_verb}
+- FTP: {ftp} W
+
+Steps sent to Wahoo:
+{describe_watts(plan_json)}"""
+    return [TextContent(type="text", text=text)]
+
+
 async def _handle_delete_workout(
     client: WahooAPIClient, arguments: Arguments
 ) -> ToolResponse:
@@ -1057,6 +1125,7 @@ TOOL_HANDLERS = {
     "get_plan": _handle_get_plan,
     "create_plan": _handle_create_plan,
     "schedule_workout": _handle_schedule_workout,
+    "push_session": _handle_push_session,
     "delete_workout": _handle_delete_workout,
     "delete_plan": _handle_delete_plan,
     "list_power_zones": _handle_list_power_zones,

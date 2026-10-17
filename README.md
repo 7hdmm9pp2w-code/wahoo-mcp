@@ -319,6 +319,34 @@ Example:
 Create the plan "Test Z2 30 min" and schedule it for tomorrow at 18:00
 ```
 
+#### push_session
+Push one planner session in one step: converts % FTP to watts with your FTP, creates or replaces the plan and schedules or updates the workout. The ID `pbp-<date>-<name>` (e.g. `pbp-2026-10-18-angels`) is used as plan `external_id` and as `workout_token`, so pushing the same session again replaces it.
+
+Parameters:
+- `date` (required): `YYYY-MM-DD`, today through 6 days ahead
+- `time` (required): local start time `HH:MM` in `WAHOO_TIMEZONE`
+- `name` (required): session name
+- `steps` (required): list of steps, each with `minutes` or `seconds` and one target: `percent_ftp` (fraction, e.g. `0.65`), `percent_ftp_min` + `percent_ftp_max`, or `watts`. No target means a free ride (RPE 1-10). Optional `name` and `type` (warmup, active, rest, cooldown, ...). A repeat block is `{"repeat": 4, "steps": [...]}`.
+- `description`, `session_id`, `workout_type`, `workout_type_id`, `ftp`, `allow_outside_window` (optional)
+
+Example:
+```json
+{
+  "date": "2026-10-18", "time": "18:00", "name": "Angels",
+  "steps": [
+    {"name": "Einfahren", "minutes": 10, "percent_ftp": 0.55, "type": "warmup"},
+    {"repeat": 4, "steps": [
+      {"name": "Schwelle", "minutes": 8, "percent_ftp": 0.9},
+      {"name": "Locker", "minutes": 4, "percent_ftp": 0.5, "type": "rest"}
+    ]},
+    {"name": "Ausfahren", "minutes": 10, "type": "cooldown"}
+  ]
+}
+```
+The reply lists the absolute watts sent to Wahoo. All validation (window, step format, % FTP as fraction) happens before the first API request. A push costs about 4 requests.
+
+`create_plan` accepts repeat blocks as well: an interval with `repeat` and nested `intervals` instead of `duration` and `targets`.
+
 #### delete_workout
 Delete a scheduled workout by `workout_id` or `workout_token`. Completed workouts (with a summary) are only deleted with `force: true`. A workout that is already gone is not an error.
 

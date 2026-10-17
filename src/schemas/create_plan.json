@@ -21,7 +21,7 @@
             "properties": {
               "duration": {
                 "type": "integer",
-                "description": "Duration in seconds"
+                "description": "Duration in seconds (not for repeat blocks)"
               },
               "targets": {
                 "type": "array",
@@ -62,16 +62,32 @@
               "interval_type": {
                 "type": "string",
                 "description": "Type of interval: work, rest, warmup, cooldown, tempo, threshold, recovery, active, or any Wahoo intensity type (wu, cd, lt, map, ac, nm, ftp, recover). Unknown types are rejected."
+              },
+              "repeat": {
+                "type": "integer",
+                "description": "Makes this a repeat block: run the nested intervals this many times in total (2-30)"
+              },
+              "intervals": {
+                "type": "array",
+                "description": "Nested intervals of a repeat block",
+                "items": {
+                  "type": "object"
+                }
               }
             },
-            "required": [
-              "duration"
-            ]
+            "required": []
           }
         },
         "workout_type": {
           "type": "string",
-          "enum": ["bike", "bike_indoor", "bike_outdoor", "run", "run_outdoor", "run_indoor"],
+          "enum": [
+            "bike",
+            "bike_indoor",
+            "bike_outdoor",
+            "run",
+            "run_outdoor",
+            "run_indoor"
+          ],
           "description": "Type of workout; sets the plan header family/location. bike = indoor bike"
         },
         "ftp": {
