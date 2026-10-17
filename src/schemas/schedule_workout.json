@@ -28,7 +28,7 @@
     },
     "workout_token": {
       "type": "string",
-      "description": "Application-specific identifier; generated when omitted"
+      "description": "Stable identifier from the planner, e.g. pbp-2026-10-18-angels. A later call with the same token updates that workout instead of creating a duplicate. Generated (no update possible) when omitted"
     },
     "allow_outside_window": {
       "type": "boolean",

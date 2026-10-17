@@ -90,7 +90,7 @@
     },
     "external_id": {
       "type": "string",
-      "description": "Unique external ID for the plan"
+      "description": "Stable ID from the planner, e.g. pbp-2026-10-18-angels. An existing plan with this ID is replaced instead of duplicated"
     },
     "provider_updated_at": {
       "type": "string",

@@ -22,7 +22,7 @@ Status: ✅ umgesetzt, ⏳ offen (Arbeitspaket in Klammern).
 5. **Plan-Create und -Delete antworten in Produktion mit 200**, nicht 201. `raise_for_status()` deckt das ab. `provider_updated_at` wird beim Zurücklesen auf ganze Sekunden gekürzt. *(quantified-self)*
 6. **403 heißt fehlender Scope oder fehlende Plans-Freigabe der App**, kein Grund für neuen Login. 422 ist ein Validierungsfehler und darf nicht wiederholt werden. *(quantified-self, wahoolib)*
 
-## Pläne ersetzen statt duplizieren (AP 5) ⏳
+## Pläne ersetzen statt duplizieren (AP 5) ✅
 
 - Ablauf: `GET /v1/plans?external_id=…` → gefunden: `PUT /v1/plans/:id` mit `plan[file]`, `plan[filename]`, `plan[provider_updated_at]` und **ohne** `plan[external_id]`. Nicht gefunden: `POST`. *(quantified-self, AiWattCoach, wahoolib)*
 - Mehr als ein Treffer ist ein Fehler. Treffer nur akzeptieren, wenn `external_id` passt und `deleted == false`. *(AiWattCoach, quantified-self)*
@@ -30,13 +30,16 @@ Status: ✅ umgesetzt, ⏳ offen (Arbeitspaket in Klammern).
 - Ein Plan pro terminiertem Workout, nicht teilen. *(quantified-self)*
 - Kein Projekt verlässt sich auf POST-Idempotenz. Geht eine Antwort verloren, erst per `external_id` bzw. `workout_token` suchen, dann PUT. *(quantified-self)*
 
-## Workouts ändern und löschen (AP 5) ⏳
+## Workouts ändern und löschen (AP 5) ✅
 
-- Gespeicherte ID per `GET /v1/workouts/:id` prüfen. Sonst `GET /v1/workouts?per_page=100` seitenweise nach `workout_token` durchsuchen (genau ein Treffer). Dann `PUT`, bei 404 auf `POST` zurückfallen. *(AiWattCoach, quantified-self)*
+- Umgesetzt ohne gespeicherte IDs: Die neuesten 50 Workouts (nach Start absteigend, geplante zuerst) werden nach `workout_token` durchsucht. Live bestätigt am 17.10.2026: erneuter Push mit gleichem Token ändert das Workout, gleiche `external_id` ersetzt den Plan (PUT ohne `external_id` funktioniert).
+- Variante der anderen Projekte: Gespeicherte ID per `GET /v1/workouts/:id` prüfen. Sonst `GET /v1/workouts?per_page=100` seitenweise nach `workout_token` durchsuchen (genau ein Treffer). Dann `PUT`, bei 404 auf `POST` zurückfallen. *(AiWattCoach, quantified-self)*
 - `workout_token` deterministisch aus der Planer-ID bilden, z. B. `pbp-2026-10-18-angels`, damit das Wiederfinden klappt.
 - Löschen: erst Workout, dann Plan. 404 beim DELETE gilt als „schon weg“. *(AiWattCoach)*
 - **Workouts mit `workout_summary` nicht überschreiben oder löschen**: Die Einheit wurde schon gefahren. *(quantified-self)*
 - Verknüpfung nach dem Schreiben prüfen: `GET /v1/workouts/:id/plans`. *(quantified-self)*
+- Beobachtet: Die Workout-Antwort hat `plan_id` gesetzt, aber `plan_ids: []`. `GET /v1/workouts/:id/plans` liefert den Plan trotzdem, und der ELEMNT ROAM zeigt ihn an.
+- Beobachtet: Die Wahoo-SYSTM-App zeigt per Cloud API geplante Workouts nicht im Kalender. Der ELEMNT ROAM zeigt sie, aber als Einheit „für heute“, obwohl sie für den Folgetag angelegt war.
 
 ## Zeit und 6-Tage-Fenster
 
@@ -51,7 +54,7 @@ Status: ✅ umgesetzt, ⏳ offen (Arbeitspaket in Klammern).
 - Absolute Watt (unser Standard) vs. relative `ftp`-Ziele: Relative Ziele passen sich an, wenn sich die FTP am Gerät ändert. Absolute Watt sind eindeutig und entsprechen dem Planer. Wir bleiben bei absoluten Watt und rechnen `percent_ftp` serverseitig um.
 - gradientpeak gibt Einzelwerten ±5 % Spielraum (`low = 0,95 × Wert`, `high = 1,05 × Wert`). Für ERG am KICKR ist ein fester Wert besser. Bei uns bleibt `low == high`, wenn nur `target_value` kommt.
 
-## Tokens und Rate-Limits ⏳
+## Tokens und Rate-Limits (429-Retry ✅, Rest ⏳)
 
 - Höchstens 10 nicht widerrufene Tokens pro Nutzer und App (seit 01/2026). Nur direkt vor einem API-Aufruf refreshen und den neuen Refresh-Token immer speichern. *(wahoolib, quantified-self)*
 - Ein generisches 400 beim Refresh kann vorübergehend sein. quantified-self wartet 5, dann 15 Minuten, bevor es neuen Login verlangt.

@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "properties": {
+    "plan_id": {
+      "type": "integer",
+      "description": "ID of the plan to delete"
+    },
+    "external_id": {
+      "type": "string",
+      "description": "external_id used when creating the plan (alternative to plan_id)"
+    }
+  }
+}

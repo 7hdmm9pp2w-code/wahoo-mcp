@@ -274,7 +274,7 @@ Use the get_power_zone tool to get details for power zone ID 321
 ```
 
 #### create_plan
-Create a new training plan in your Wahoo account.
+Create a training plan in your Wahoo account, or replace the plan with the same `external_id` (`GET /v1/plans?external_id=` then `PUT`, otherwise `POST`). Deleted plans that Wahoo still lists with `deleted=true` are ignored.
 
 Parameters:
 - `plan` (required): Complete workout plan structure containing:
@@ -311,13 +311,22 @@ Parameters:
 - `plan_id` (optional): Plan to attach (from `create_plan` or `list_plans`)
 - `route_id` (optional): Route to attach
 - `workout_type_id` (optional): defaults to 12 (indoor biking)
-- `workout_token` (optional): your own identifier; generated if omitted
+- `workout_token` (optional): stable identifier from your planner. If a workout with this token exists among the 50 latest-starting workouts, it is updated instead of duplicated; completed workouts are never overwritten. Generated if omitted (no update possible then).
 - `allow_outside_window` (optional): Wahoo only syncs workouts starting today through 6 days ahead to devices. Other dates are rejected unless this is `true`.
 
 Example:
 ```
 Create the plan "Test Z2 30 min" and schedule it for tomorrow at 18:00
 ```
+
+#### delete_workout
+Delete a scheduled workout by `workout_id` or `workout_token`. Completed workouts (with a summary) are only deleted with `force: true`. A workout that is already gone is not an error.
+
+#### delete_plan
+Delete a plan by `plan_id` or `external_id`. Linked workouts are kept without plan. Wahoo keeps the deleted plan's `external_id` listed, so re-create it under a new `external_id`.
+
+#### Rate limits
+Sandbox apps may send 25 requests per 5 minutes, 100 per hour and 250 per day. On HTTP 429 the server waits up to 60 s (`Retry-After` / `X-RateLimit-Reset`) and retries once, otherwise it reports when to try again. A replacing push costs about 4 requests (plan lookup, plan PUT, workout lookup, workout PUT).
 
 ## Development
 
