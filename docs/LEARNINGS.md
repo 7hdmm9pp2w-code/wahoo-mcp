@@ -30,6 +30,15 @@ Status: ✅ umgesetzt, ⏳ offen (Arbeitspaket in Klammern).
 - Ein Plan pro terminiertem Workout, nicht teilen. *(quantified-self)*
 - Kein Projekt verlässt sich auf POST-Idempotenz. Geht eine Antwort verloren, erst per `external_id` bzw. `workout_token` suchen, dann PUT. *(quantified-self)*
 
+## Geräte holen geänderte Pläne nur bei geändertem Workout ✅
+
+Live gefunden am 17.10.2026, in keinem der anderen Projekte dokumentiert:
+
+- Der ELEMNT ROAM lädt einen Plan nur neu, wenn sich das **Workout** ändert (dessen `updated_at`). Ein per PUT ersetzter Plan allein bleibt auf dem Gerät auf der alten Fassung, auch nach mehrfachem Sync.
+- Wahoo setzt `updated_at` eines Workouts bei einem PUT ohne inhaltliche Änderung **nicht** neu.
+- Lösung: Wird ein Plan ersetzt und das Workout bliebe gleich, verschiebt der Server den Start um eine Sekunde (wechselnd :00 ↔ :01). `push_session` macht das automatisch. `create_plan` fasst beim Ersetzen alle kommenden, nicht gefahrenen Workouts mit diesem Plan so an (1 GET + 1 PUT pro Workout).
+- Der zuerst vermutete Grund (Repeat-Block, RPE-Ziel) war es nicht: v4 mit Repeat-Block erschien sofort, nachdem das Workout geändert wurde.
+
 ## Workouts ändern und löschen (AP 5) ✅
 
 - Umgesetzt ohne gespeicherte IDs: Die neuesten 50 Workouts (nach Start absteigend, geplante zuerst) werden nach `workout_token` durchsucht. Live bestätigt am 17.10.2026: erneuter Push mit gleichem Token ändert das Workout, gleiche `external_id` ersetzt den Plan (PUT ohne `external_id` funktioniert).

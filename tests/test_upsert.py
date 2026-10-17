@@ -318,3 +318,110 @@ class TestRateLimit:
         async with WahooAPIClient(WahooConfig()) as client:
             with pytest.raises(ValueError, match="rate limit"):
                 await client.delete_plan(7)
+
+
+class TestDevicesSeePlanChanges:
+    """The ELEMNT only re-downloads a plan when its workout's updated_at moves,
+    and Wahoo does not move it for a PUT without changes."""
+
+    async def test_unchanged_workout_is_nudged_when_plan_changed(self, httpx_mock):
+        httpx_mock.add_response(
+            method="GET", url=WORKOUTS_URL, json={"workouts": [_workout_row(42)]}
+        )
+        httpx_mock.add_response(
+            method="PUT", url=f"{API}/v1/workouts/42", json=_workout_row(42)
+        )
+        async with WahooAPIClient(WahooConfig()) as client:
+            await client.upsert_workout(_workout_request(), plan_changed=True)
+        form = _form(httpx_mock.get_requests()[1])
+        assert form["workout[starts]"] == ["2026-10-18T16:00:01.000Z"]
+
+    async def test_no_nudge_without_plan_change(self, httpx_mock):
+        httpx_mock.add_response(
+            method="GET", url=WORKOUTS_URL, json={"workouts": [_workout_row(42)]}
+        )
+        httpx_mock.add_response(
+            method="PUT", url=f"{API}/v1/workouts/42", json=_workout_row(42)
+        )
+        async with WahooAPIClient(WahooConfig()) as client:
+            await client.upsert_workout(_workout_request())
+        form = _form(httpx_mock.get_requests()[1])
+        assert form["workout[starts]"] == ["2026-10-18T16:00:00.000Z"]
+
+    async def test_no_nudge_when_workout_changes_anyway(self, httpx_mock):
+        httpx_mock.add_response(
+            method="GET", url=WORKOUTS_URL, json={"workouts": [_workout_row(42)]}
+        )
+        httpx_mock.add_response(
+            method="PUT", url=f"{API}/v1/workouts/42", json=_workout_row(42)
+        )
+        request = _workout_request().model_copy(update={"minutes": 45})
+        async with WahooAPIClient(WahooConfig()) as client:
+            await client.upsert_workout(request, plan_changed=True)
+        form = _form(httpx_mock.get_requests()[1])
+        assert form["workout[starts]"] == ["2026-10-18T16:00:00.000Z"]
+
+    async def test_nudge_toggles_back(self, httpx_mock):
+        row = _workout_row(42) | {"starts": "2026-10-18T16:00:01.000Z"}
+        httpx_mock.add_response(
+            method="GET", url=WORKOUTS_URL, json={"workouts": [row]}
+        )
+        httpx_mock.add_response(method="PUT", url=f"{API}/v1/workouts/42", json=row)
+        request = _workout_request().model_copy(
+            update={"starts": _workout_request().starts.replace(second=1)}
+        )
+        async with WahooAPIClient(WahooConfig()) as client:
+            await client.upsert_workout(request, plan_changed=True)
+        form = _form(httpx_mock.get_requests()[1])
+        assert form["workout[starts]"] == ["2026-10-18T16:00:00.000Z"]
+
+    async def test_touch_only_upcoming_open_workouts_of_the_plan(self, httpx_mock):
+        future = "2099-01-01T16:00:00.000Z"
+        rows = [
+            _workout_row(1) | {"starts": future},
+            _workout_row(2, token="t2") | {"starts": future, "plan_id": 8},
+            _workout_row(3, token="t3", summary={"id": 1}) | {"starts": future},
+            _workout_row(4, token="t4") | {"starts": "2020-01-01T16:00:00.000Z"},
+        ]
+        httpx_mock.add_response(method="GET", url=WORKOUTS_URL, json={"workouts": rows})
+        httpx_mock.add_response(
+            method="PUT", url=f"{API}/v1/workouts/1", json=_workout_row(1)
+        )
+        async with WahooAPIClient(WahooConfig()) as client:
+            assert await client.touch_workouts_for_plan(7) == [1]
+        form = _form(httpx_mock.get_requests()[1])
+        assert form["workout[starts]"] == ["2099-01-01T16:00:01.000Z"]
+        assert form["workout[plan_id]"] == ["7"]
+
+    async def test_create_plan_replacement_touches_workouts(self, httpx_mock):
+        httpx_mock.add_response(
+            method="GET", url=f"{API}/v1/plans?external_id=pbp-x", json=[_plan_row(7)]
+        )
+        httpx_mock.add_response(
+            method="PUT", url=f"{API}/v1/plans/7", json=_plan_response(7)
+        )
+        with patch(
+            "src.server.WahooAPIClient.touch_workouts_for_plan",
+            new_callable=AsyncMock,
+            return_value=[42],
+        ) as touch:
+            result = await call_tool(
+                "create_plan",
+                {
+                    "external_id": "pbp-x",
+                    "provider_updated_at": "2026-10-17T16:00:00Z",
+                    "plan": {
+                        "name": "Test",
+                        "intervals": [
+                            {
+                                "duration": 600,
+                                "targets": [
+                                    {"target_type": "watts", "target_value": 135}
+                                ],
+                            }
+                        ],
+                    },
+                },
+            )
+        touch.assert_awaited_once_with(7)
+        assert "Marked upcoming workouts 42 as changed" in result[0].text

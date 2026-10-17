@@ -6,7 +6,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -76,6 +76,32 @@ def _rate_limit_wait_seconds(response: httpx.Response) -> float | None:
                 value -= time.time()
             waits.append(max(value, 0.0))
     return max(waits) if waits else None
+
+
+def _same_workout(existing: Workout, workout_request: CreateWorkoutRequest) -> bool:
+    """Whether a PUT with this request would leave the workout unchanged."""
+    form = workout_request.to_form_data()
+    current = {
+        "workout[name]": existing.name,
+        "workout[workout_token]": existing.workout_token,
+        "workout[workout_type_id]": str(existing.workout_type_id),
+        "workout[starts]": existing.starts,
+        "workout[minutes]": str(existing.minutes),
+    }
+    if existing.plan_id is not None:
+        current["workout[plan_id]"] = str(existing.plan_id)
+    if existing.route_id is not None:
+        current["workout[route_id]"] = str(existing.route_id)
+    return form == current
+
+
+def _nudged(workout_request: CreateWorkoutRequest) -> CreateWorkoutRequest:
+    """Shift the start by one second (toggling between :00 and :01), the
+    smallest change that moves the workout's updated_at."""
+    step = 1 if workout_request.starts.second % 2 == 0 else -1
+    return workout_request.model_copy(
+        update={"starts": workout_request.starts + timedelta(seconds=step)}
+    )
 
 
 # Header values above this are epoch timestamps, not delays in seconds.
@@ -351,9 +377,14 @@ class WahooAPIClient:
         return matches[0] if matches else None
 
     async def upsert_workout(
-        self, workout_request: CreateWorkoutRequest
+        self, workout_request: CreateWorkoutRequest, plan_changed: bool = False
     ) -> tuple[str, Workout]:
-        """Update the workout with the same workout_token, or create it."""
+        """Update the workout with the same workout_token, or create it.
+
+        ``plan_changed`` makes sure the workout itself changes too: the ELEMNT
+        only re-downloads a plan when its workout's updated_at moves, and Wahoo
+        leaves updated_at alone on a PUT that changes nothing.
+        """
         existing = await self.find_workout_by_token(workout_request.workout_token)
         if existing is None:
             return "created", await self.create_workout(workout_request)
@@ -362,7 +393,35 @@ class WahooAPIClient:
                 f"Workout {existing.id} ('{existing.name}') was already completed "
                 "and is not overwritten; use a new workout_token"
             )
+        if plan_changed and _same_workout(existing, workout_request):
+            workout_request = _nudged(workout_request)
         return "updated", await self.update_workout(existing.id, workout_request)
+
+    async def touch_workouts_for_plan(self, plan_id: int) -> list[int]:
+        """Mark upcoming workouts using this plan as changed, so devices fetch
+        the new plan version. Returns the IDs of the touched workouts."""
+        response = await self._request(
+            "GET", "/v1/workouts", params={"page": 1, "per_page": WORKOUT_LOOKUP_PAGE}
+        )
+        now = datetime.now(UTC)
+        touched = []
+        for row in response.json().get("workouts", []):
+            workout = Workout(**row)
+            starts = datetime.fromisoformat(workout.starts.replace("Z", "+00:00"))
+            if workout.plan_id != plan_id or workout.workout_summary or starts < now:
+                continue
+            request = CreateWorkoutRequest(
+                name=workout.name,
+                starts=starts,
+                minutes=workout.minutes,
+                workout_token=workout.workout_token,
+                workout_type_id=workout.workout_type_id,
+                plan_id=workout.plan_id,
+                route_id=workout.route_id,
+            )
+            await self.update_workout(workout.id, _nudged(request))
+            touched.append(workout.id)
+        return touched
 
     async def delete_workout(self, workout_id: int, force: bool = False) -> bool:
         """Delete a workout. Returns False if it was already gone.
@@ -954,6 +1013,14 @@ async def _handle_create_plan(
     action, created_plan = await client.upsert_plan(plan_request)
 
     result = _format_plan_result(created_plan, action)
+    if action == "updated":
+        touched = await client.touch_workouts_for_plan(created_plan.id)
+        if touched:
+            ids = ", ".join(str(workout_id) for workout_id in touched)
+            result += (
+                f"\n\nMarked upcoming workouts {ids} as changed so devices "
+                "download the new plan version."
+            )
     return [TextContent(type="text", text=result)]
 
 
@@ -1023,7 +1090,8 @@ async def _handle_push_session(
             workout_token=sid,
             workout_type_id=session.workout_type_id,
             plan_id=created_plan.id,
-        )
+        ),
+        plan_changed=plan_action == "updated",
     )
 
     plan_verb = "replaced" if plan_action == "updated" else "created"
