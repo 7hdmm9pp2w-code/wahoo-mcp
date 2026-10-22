@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "workout_id": {
+      "type": "integer",
+      "description": "ID of the workout to delete"
+    },
+    "workout_token": {
+      "type": "string",
+      "description": "workout_token used when scheduling (alternative to workout_id)"
+    },
+    "force": {
+      "type": "boolean",
+      "description": "Also delete a workout that was already completed (has a summary)"
+    }
+  }
+}

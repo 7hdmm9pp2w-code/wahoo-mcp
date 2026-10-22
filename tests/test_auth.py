@@ -17,6 +17,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase
 
+from src.scopes import OAUTH_SCOPES
 from src.token_store import TokenData
 
 # Set environment variables before importing auth module
@@ -53,6 +54,7 @@ class TestAuthModule(AioHTTPTestCase):
             patch("src.auth.CLIENT_SECRET", "test_client_secret"),
             patch("src.auth.REDIRECT_URI", "http://localhost:8080/callback"),
             patch("src.auth.code_verifier", "test_verifier"),
+            patch("src.auth.STATE", "test_state"),
             patch("src.auth.TOKEN_URL", "https://api.wahooligan.com/oauth/token"),
             patch("src.auth.token_store") as mock_store,
         ):
@@ -78,7 +80,7 @@ class TestAuthModule(AioHTTPTestCase):
 
                 # Test successful callback
                 response = await self.client.request(
-                    "GET", "/callback?code=test_auth_code"
+                    "GET", "/callback?code=test_auth_code&state=test_state"
                 )
 
                 self.assertEqual(response.status, HTTPStatus.OK)
@@ -103,6 +105,20 @@ class TestAuthModule(AioHTTPTestCase):
         self.assertEqual(response.status, HTTPStatus.BAD_REQUEST)
         self.assertIn("No authorization code received", await response.text())
 
+    async def test_callback_handler_state_mismatch(self):
+        """Callbacks with a foreign state are rejected before any token exchange."""
+        with (
+            patch("src.auth.STATE", "test_state"),
+            patch("httpx.AsyncClient") as mock_client_class,
+        ):
+            response = await self.client.request(
+                "GET", "/callback?code=test_code&state=forged"
+            )
+
+            self.assertEqual(response.status, HTTPStatus.BAD_REQUEST)
+            self.assertIn("State mismatch", await response.text())
+            mock_client_class.assert_not_called()
+
     async def test_callback_handler_token_exchange_failure(self):
         """Test token exchange failure."""
         with (
@@ -110,6 +126,7 @@ class TestAuthModule(AioHTTPTestCase):
             patch("src.auth.CLIENT_SECRET", "test_client_secret"),
             patch("src.auth.REDIRECT_URI", "http://localhost:8080/callback"),
             patch("src.auth.code_verifier", "test_verifier"),
+            patch("src.auth.STATE", "test_state"),
             patch("src.auth.TOKEN_URL", "https://api.wahooligan.com/oauth/token"),
         ):
             # Mock failed HTTP response
@@ -124,7 +141,7 @@ class TestAuthModule(AioHTTPTestCase):
                 mock_client_class.return_value = mock_client
 
                 response = await self.client.request(
-                    "GET", "/callback?code=invalid_code"
+                    "GET", "/callback?code=invalid_code&state=test_state"
                 )
 
                 self.assertEqual(response.status, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -137,6 +154,7 @@ class TestAuthModule(AioHTTPTestCase):
             patch("src.auth.CLIENT_SECRET", "test_client_secret"),
             patch("src.auth.REDIRECT_URI", "http://localhost:8080/callback"),
             patch("src.auth.code_verifier", "test_verifier"),
+            patch("src.auth.STATE", "test_state"),
             patch("src.auth.TOKEN_URL", "https://api.wahooligan.com/oauth/token"),
         ):
             with patch("httpx.AsyncClient") as mock_client_class:
@@ -145,7 +163,9 @@ class TestAuthModule(AioHTTPTestCase):
                 mock_client.__aenter__.return_value = mock_client
                 mock_client_class.return_value = mock_client
 
-                response = await self.client.request("GET", "/callback?code=test_code")
+                response = await self.client.request(
+                    "GET", "/callback?code=test_code&state=test_state"
+                )
 
                 self.assertEqual(response.status, HTTPStatus.INTERNAL_SERVER_ERROR)
                 self.assertIn("Error: Network error", await response.text())
@@ -358,37 +378,23 @@ class TestOAuthScopes:
     """Test OAuth scope configuration."""
 
     def test_required_scopes(self):
-        """Test that all required scopes are included."""
-        # Scopes from the auth module
-        expected_scopes = [
+        """All scopes the tools need are requested."""
+        scope_list = OAUTH_SCOPES.split()
+        for scope in [
             "user_read",
             "workouts_read",
+            "workouts_write",
             "routes_read",
             "plans_read",
             "plans_write",
             "power_zones_read",
-        ]
-
-        auth_scopes = (
-            "user_read workouts_read routes_read plans_read "
-            "plans_write power_zones_read"
-        )
-
-        for scope in expected_scopes:
-            assert scope in auth_scopes
+        ]:
+            assert scope in scope_list
 
     def test_scope_string_format(self):
-        """Test scope string is properly formatted."""
-        auth_scopes = (
-            "user_read workouts_read routes_read plans_read "
-            "plans_write power_zones_read"
-        )
-
-        # Should be space-separated
-        scope_list = auth_scopes.split()
-        assert len(scope_list) == 6
-        assert "user_read" in scope_list
-        assert "plans_write" in scope_list
+        """Scopes are space-separated without duplicates."""
+        scope_list = OAUTH_SCOPES.split()
+        assert len(scope_list) == len(set(scope_list)) == 7
 
 
 @pytest.mark.asyncio

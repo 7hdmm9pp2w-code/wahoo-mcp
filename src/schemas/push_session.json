@@ -1,0 +1,109 @@
+{
+  "type": "object",
+  "properties": {
+    "date": {
+      "type": "string",
+      "description": "Session date YYYY-MM-DD, today through 6 days ahead"
+    },
+    "time": {
+      "type": "string",
+      "description": "Local start time HH:MM in WAHOO_TIMEZONE (default Europe/Berlin)"
+    },
+    "name": {
+      "type": "string",
+      "description": "Session name; with the date it forms the ID pbp-<date>-<name>"
+    },
+    "steps": {
+      "type": "array",
+      "description": "Steps in order. A step without target is a free ride (RPE 1-10). Example: [{\"name\": \"Einfahren\", \"minutes\": 10, \"percent_ftp\": 0.55, \"type\": \"warmup\"}, {\"repeat\": 4, \"steps\": [{\"minutes\": 8, \"percent_ftp\": 0.9}, {\"minutes\": 4, \"percent_ftp\": 0.5, \"type\": \"rest\"}]}]",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Step name shown on the ELEMNT"
+          },
+          "minutes": {
+            "type": "number",
+            "description": "Duration in minutes (or use seconds)"
+          },
+          "seconds": {
+            "type": "integer",
+            "description": "Duration in seconds (or use minutes)"
+          },
+          "percent_ftp": {
+            "type": "number",
+            "description": "Target as fraction of FTP, e.g. 0.65 (converted to watts)"
+          },
+          "percent_ftp_min": {
+            "type": "number",
+            "description": "Lower bound of a target range as fraction of FTP"
+          },
+          "percent_ftp_max": {
+            "type": "number",
+            "description": "Upper bound of a target range as fraction of FTP"
+          },
+          "watts": {
+            "type": "integer",
+            "description": "Absolute target in watts (instead of percent_ftp)"
+          },
+          "type": {
+            "type": "string",
+            "description": "warmup, active (default), tempo, threshold, rest, recovery, cooldown"
+          },
+          "repeat": {
+            "type": "integer",
+            "description": "Makes this a repeat block: run steps this many times in total (2-30)"
+          },
+          "steps": {
+            "type": "array",
+            "description": "Steps of a repeat block (no nesting beyond one level needed)",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "description": {
+      "type": "string",
+      "description": "Shown on the ELEMNT; defaults to the name"
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Overrides the derived ID, e.g. pbp-2026-10-18-angels"
+    },
+    "workout_type": {
+      "type": "string",
+      "enum": [
+        "bike",
+        "bike_indoor",
+        "bike_outdoor",
+        "run",
+        "run_outdoor",
+        "run_indoor"
+      ],
+      "description": "Plan type; default bike (indoor)"
+    },
+    "workout_type_id": {
+      "type": "integer",
+      "description": "Wahoo workout type; default 12 (indoor biking)"
+    },
+    "ftp": {
+      "type": "integer",
+      "description": "FTP in watts; defaults to WAHOO_FTP or the Wahoo power zones"
+    },
+    "allow_outside_window": {
+      "type": "boolean",
+      "description": "Push even outside today .. today + 6 days (devices will not receive it)"
+    }
+  },
+  "required": [
+    "date",
+    "time",
+    "name",
+    "steps"
+  ],
+  "additionalProperties": false
+}

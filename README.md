@@ -85,7 +85,8 @@ pip install -e ".[dev]"
    This will:
    - Use credentials from `.env` (or prompt if not set)
    - Open a browser for OAuth authentication
-   - Start a local server to receive the callback
+   - Receive the callback: with an `https://localhost/...` redirect URI (Wahoo requires https), paste the redirected URL from the browser's address bar into the terminal; otherwise a local callback server receives it
+   - Check the OAuth `state`, and use the client secret (confidential app) or PKCE (public app, no secret set), never both
    - Save your tokens to the file specified by `WAHOO_TOKEN_FILE`
    - Tokens will be automatically refreshed when needed
 
@@ -106,6 +107,12 @@ The auth server can be configured via environment variables:
 - `WAHOO_CLIENT_ID`: Your Wahoo Client ID
 - `WAHOO_CLIENT_SECRET`: Your Wahoo Client Secret
 - `WAHOO_TOKEN_FILE`: Path to store OAuth tokens (required)
+
+**Plans and scheduling:**
+- `WAHOO_FTP`: FTP in watts for plan headers and `percent_ftp` targets. If unset, the FTP is read from your Wahoo power zones.
+- `WAHOO_TIMEZONE`: Timezone for start times without an offset and for the 6-day sync window (default: `Europe/Berlin`)
+
+**Scopes:** the server requests `workouts_write` to schedule workouts. Tokens created before this change lack it: run `make auth` again.
 
 **Example Configurations:**
 
@@ -267,7 +274,7 @@ Use the get_power_zone tool to get details for power zone ID 321
 ```
 
 #### create_plan
-Create a new training plan in your Wahoo account.
+Create a training plan in your Wahoo account, or replace the plan with the same `external_id` (`GET /v1/plans?external_id=` then `PUT`, otherwise `POST`). Deleted plans that Wahoo still lists with `deleted=true` are ignored.
 
 Parameters:
 - `plan` (required): Complete workout plan structure containing:
@@ -275,10 +282,11 @@ Parameters:
   - `description` (optional): Description of the workout
   - `intervals` (required): List of workout intervals, each containing:
     - `duration` (required): Duration in seconds
-    - `targets` (required): List of targets (power, heart_rate, speed, pace, rpe, cadence)
+    - `targets` (required): List of targets. Use `watts` for absolute power (recommended) or `percent_ftp` with a fraction (e.g. `0.95`), which is converted to watts. Also: hr, rpm, rpe, speed and the Wahoo relative types ftp, map, ac, nm. Each target needs `target_value` or `target_min` + `target_max`.
     - `name` (optional): Name/description of the interval
     - `interval_type` (optional): Type (work, rest, warmup, cooldown, tempo, threshold, recovery, active, or Wahoo types: wu, cd, lt, map, ac, nm, ftp, recover)
-  - `workout_type` (optional): Type of workout (bike, run, swim) - defaults to "bike"
+  - `workout_type` (optional): bike (indoor, default), bike_indoor, bike_outdoor, run (outdoor), run_outdoor, run_indoor. Sets the plan header family and location.
+  - `ftp` (optional): FTP in watts; defaults to `WAHOO_FTP` or your Wahoo power zones
   - `estimated_duration` (optional): Estimated total duration in seconds
   - `estimated_tss` (optional): Estimated Training Stress Score
   - `author` (optional): Author of the plan
@@ -286,10 +294,67 @@ Parameters:
 - `provider_updated_at` (required): External date/time the file was updated (ISO 8601 format)
 - `filename` (optional): Name of the plan file
 
+Unknown target or interval types are rejected instead of being silently converted.
+
 Example:
 ```
 Use the create_plan tool to create a new training plan with intervals for power and heart rate zones
 ```
+
+#### schedule_workout
+Schedule a workout on your Wahoo calendar and attach a plan, so it shows up on the ELEMNT and KICKR.
+
+Parameters:
+- `name` (required): Workout name
+- `starts` (required): ISO 8601 start time; without an offset it is read in `WAHOO_TIMEZONE`
+- `minutes` (required): Planned duration in minutes
+- `plan_id` (optional): Plan to attach (from `create_plan` or `list_plans`)
+- `route_id` (optional): Route to attach
+- `workout_type_id` (optional): defaults to 12 (indoor biking)
+- `workout_token` (optional): stable identifier from your planner. If a workout with this token exists among the 50 latest-starting workouts, it is updated instead of duplicated; completed workouts are never overwritten. Generated if omitted (no update possible then).
+- `allow_outside_window` (optional): Wahoo only syncs workouts starting today through 6 days ahead to devices. Other dates are rejected unless this is `true`.
+
+Example:
+```
+Create the plan "Test Z2 30 min" and schedule it for tomorrow at 18:00
+```
+
+#### push_session
+Push one planner session in one step: converts % FTP to watts with your FTP, creates or replaces the plan and schedules or updates the workout. The ID `pbp-<date>-<name>` (e.g. `pbp-2026-10-18-angels`) is used as plan `external_id` and as `workout_token`, so pushing the same session again replaces it.
+
+Parameters:
+- `date` (required): `YYYY-MM-DD`, today through 6 days ahead
+- `time` (required): local start time `HH:MM` in `WAHOO_TIMEZONE`
+- `name` (required): session name
+- `steps` (required): list of steps, each with `minutes` or `seconds` and one target: `percent_ftp` (fraction, e.g. `0.65`), `percent_ftp_min` + `percent_ftp_max`, or `watts`. No target means a free ride (RPE 1-10). Optional `name` and `type` (warmup, active, rest, cooldown, ...). A repeat block is `{"repeat": 4, "steps": [...]}`.
+- `description`, `session_id`, `workout_type`, `workout_type_id`, `ftp`, `allow_outside_window` (optional)
+
+Example:
+```json
+{
+  "date": "2026-10-18", "time": "18:00", "name": "Angels",
+  "steps": [
+    {"name": "Einfahren", "minutes": 10, "percent_ftp": 0.55, "type": "warmup"},
+    {"repeat": 4, "steps": [
+      {"name": "Schwelle", "minutes": 8, "percent_ftp": 0.9},
+      {"name": "Locker", "minutes": 4, "percent_ftp": 0.5, "type": "rest"}
+    ]},
+    {"name": "Ausfahren", "minutes": 10, "type": "cooldown"}
+  ]
+}
+```
+The reply lists the absolute watts sent to Wahoo. All validation (window, step format, % FTP as fraction) happens before the first API request. A push costs about 4 requests.
+
+`create_plan` accepts repeat blocks as well: an interval with `repeat` and nested `intervals` instead of `duration` and `targets`.
+
+#### delete_workout
+Delete a scheduled workout by `workout_id` or `workout_token`. Completed workouts (with a summary) are only deleted with `force: true`. A workout that is already gone is not an error.
+
+#### delete_plan
+Delete a plan by `plan_id` or `external_id`. Linked workouts are kept without plan. Wahoo keeps the deleted plan's `external_id` listed, so re-create it under a new `external_id`.
+
+#### Rate limits
+Sandbox apps may send 25 requests per 5 minutes, 100 per hour and 250 per day. On HTTP 429 the server waits up to 60 s (`Retry-After` / `X-RateLimit-Reset`) and retries once, otherwise it reports when to try again. A replacing push costs about 4 requests (plan lookup, plan PUT, workout lookup, workout PUT).
 
 ## Development
 

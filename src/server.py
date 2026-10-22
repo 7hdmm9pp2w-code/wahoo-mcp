@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
+import asyncio
 import base64
 import json
 import logging
 import os
+import time
+import uuid
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -15,8 +19,10 @@ from mcp.types import TextContent, Tool
 from pydantic import BaseModel, Field
 
 from .models import (
+    WORKOUT_TYPE_HEADERS,
     CreatePlanRequest,
     CreatePlanResponse,
+    CreateWorkoutRequest,
     Plan,
     PowerZone,
     Route,
@@ -24,7 +30,9 @@ from .models import (
     WorkoutInterval,
     WorkoutPlan,
     WorkoutTarget,
+    check_schedule_window,
 )
+from .session import Session, describe_watts
 from .token_store import TokenStore
 
 # Type aliases for cleaner function signatures
@@ -42,6 +50,62 @@ class WahooConfig(BaseModel):
     base_url: str = Field(
         default="https://api.wahooligan.com", description="Base URL for Wahoo API"
     )
+
+
+# Longest wait for a 429 before giving up instead of blocking the tool call.
+MAX_RATE_LIMIT_WAIT_SECONDS = 60
+
+# Workouts fetched to find one by workout_token (newest start times first).
+WORKOUT_LOOKUP_PAGE = 50
+
+
+def _rate_limit_wait_seconds(response: httpx.Response) -> float | None:
+    """Seconds to wait after a 429, from Retry-After or X-RateLimit-Reset.
+
+    Wahoo may send several comma-separated values (one per limit window);
+    the longest wait wins. Epoch timestamps are converted to a delay.
+    """
+    waits = []
+    for header in ("Retry-After", "X-RateLimit-Reset"):
+        for part in response.headers.get(header, "").split(","):
+            try:
+                value = float(part.strip())
+            except ValueError:
+                continue
+            if value > EPOCH_THRESHOLD:
+                value -= time.time()
+            waits.append(max(value, 0.0))
+    return max(waits) if waits else None
+
+
+def _same_workout(existing: Workout, workout_request: CreateWorkoutRequest) -> bool:
+    """Whether a PUT with this request would leave the workout unchanged."""
+    form = workout_request.to_form_data()
+    current = {
+        "workout[name]": existing.name,
+        "workout[workout_token]": existing.workout_token,
+        "workout[workout_type_id]": str(existing.workout_type_id),
+        "workout[starts]": existing.starts,
+        "workout[minutes]": str(existing.minutes),
+    }
+    if existing.plan_id is not None:
+        current["workout[plan_id]"] = str(existing.plan_id)
+    if existing.route_id is not None:
+        current["workout[route_id]"] = str(existing.route_id)
+    return form == current
+
+
+def _nudged(workout_request: CreateWorkoutRequest) -> CreateWorkoutRequest:
+    """Shift the start by one second (toggling between :00 and :01), the
+    smallest change that moves the workout's updated_at."""
+    step = 1 if workout_request.starts.second % 2 == 0 else -1
+    return workout_request.model_copy(
+        update={"starts": workout_request.starts + timedelta(seconds=step)}
+    )
+
+
+# Header values above this are epoch timestamps, not delays in seconds.
+EPOCH_THRESHOLD = 1_000_000_000
 
 
 class WahooAPIClient:
@@ -222,6 +286,166 @@ class WahooAPIClient:
             logger.error(f"Failed to parse workout {workout_id}: {e}")
             raise ValueError(f"Invalid workout data received from API: {e}") from e
 
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: dict | None = None,
+        params: dict | None = None,
+        allowed_statuses: tuple[int, ...] = (),
+    ) -> httpx.Response:
+        """Send a request, refreshing the token once on 401 and waiting once
+        on 429. Form data is sent form-encoded as the Wahoo API expects."""
+        await self._ensure_valid_token()
+
+        def send() -> Any:
+            headers = {"Authorization": f"Bearer {self.token_data.access_token}"}
+            if data is not None:
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+            return self.client.request(
+                method, url, data=data, params=params, headers=headers
+            )
+
+        response = await send()
+        if response.status_code == HTTPStatus.UNAUTHORIZED:
+            logger.info("Got 401 Unauthorized, attempting to refresh token")
+            if not await self._refresh_access_token():
+                raise httpx.HTTPStatusError(
+                    "Authentication failed and token refresh was unsuccessful",
+                    request=response.request,
+                    response=response,
+                )
+            response = await send()
+
+        if response.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+            wait = _rate_limit_wait_seconds(response)
+            if wait is None or wait > MAX_RATE_LIMIT_WAIT_SECONDS:
+                raise ValueError(
+                    "Wahoo rate limit reached"
+                    + (f"; retry in {wait:.0f} s" if wait else "")
+                    + " (sandbox: 25 requests per 5 min, 100 per hour, 250 per day)"
+                )
+            logger.info(f"Rate limited, waiting {wait:.0f} s before retrying")
+            await asyncio.sleep(wait)
+            response = await send()
+
+        if response.status_code not in allowed_statuses:
+            response.raise_for_status()
+        return response
+
+    async def create_workout(self, workout_request: CreateWorkoutRequest) -> Workout:
+        """Schedule a workout, optionally with a plan attached"""
+        response = await self._request(
+            "POST", "/v1/workouts", data=workout_request.to_form_data()
+        )
+        try:
+            return Workout(**response.json())
+        except Exception as e:
+            logger.error(f"Failed to parse created workout: {e}")
+            raise ValueError(f"Invalid workout data received from API: {e}") from e
+
+    async def update_workout(
+        self, workout_id: int, workout_request: CreateWorkoutRequest
+    ) -> Workout:
+        """Replace name, start, duration and plan of a scheduled workout"""
+        response = await self._request(
+            "PUT", f"/v1/workouts/{workout_id}", data=workout_request.to_form_data()
+        )
+        return Workout(**response.json())
+
+    async def find_workout_by_token(self, workout_token: str) -> Workout | None:
+        """Find a workout by workout_token among the most recent workouts.
+
+        The API sorts by start time descending, so scheduled (future) workouts
+        come first and one page covers them.
+        """
+        response = await self._request(
+            "GET", "/v1/workouts", params={"page": 1, "per_page": WORKOUT_LOOKUP_PAGE}
+        )
+        matches = [
+            Workout(**workout)
+            for workout in response.json().get("workouts", [])
+            if workout.get("workout_token") == workout_token
+        ]
+        if len(matches) > 1:
+            ids = ", ".join(str(workout.id) for workout in matches)
+            raise ValueError(
+                f"Several workouts share workout_token '{workout_token}' ({ids}); "
+                "delete the duplicates first"
+            )
+        return matches[0] if matches else None
+
+    async def upsert_workout(
+        self, workout_request: CreateWorkoutRequest, plan_changed: bool = False
+    ) -> tuple[str, Workout]:
+        """Update the workout with the same workout_token, or create it.
+
+        ``plan_changed`` makes sure the workout itself changes too: the ELEMNT
+        only re-downloads a plan when its workout's updated_at moves, and Wahoo
+        leaves updated_at alone on a PUT that changes nothing.
+        """
+        existing = await self.find_workout_by_token(workout_request.workout_token)
+        if existing is None:
+            return "created", await self.create_workout(workout_request)
+        if existing.workout_summary:
+            raise ValueError(
+                f"Workout {existing.id} ('{existing.name}') was already completed "
+                "and is not overwritten; use a new workout_token"
+            )
+        if plan_changed and _same_workout(existing, workout_request):
+            workout_request = _nudged(workout_request)
+        return "updated", await self.update_workout(existing.id, workout_request)
+
+    async def touch_workouts_for_plan(self, plan_id: int) -> list[int]:
+        """Mark upcoming workouts using this plan as changed, so devices fetch
+        the new plan version. Returns the IDs of the touched workouts."""
+        response = await self._request(
+            "GET", "/v1/workouts", params={"page": 1, "per_page": WORKOUT_LOOKUP_PAGE}
+        )
+        now = datetime.now(UTC)
+        touched = []
+        for row in response.json().get("workouts", []):
+            workout = Workout(**row)
+            starts = datetime.fromisoformat(workout.starts.replace("Z", "+00:00"))
+            if workout.plan_id != plan_id or workout.workout_summary or starts < now:
+                continue
+            request = CreateWorkoutRequest(
+                name=workout.name,
+                starts=starts,
+                minutes=workout.minutes,
+                workout_token=workout.workout_token,
+                workout_type_id=workout.workout_type_id,
+                plan_id=workout.plan_id,
+                route_id=workout.route_id,
+            )
+            await self.update_workout(workout.id, _nudged(request))
+            touched.append(workout.id)
+        return touched
+
+    async def delete_workout(self, workout_id: int, force: bool = False) -> bool:
+        """Delete a workout. Returns False if it was already gone.
+
+        Completed workouts (with a summary) are only deleted with force=True.
+        """
+        response = await self._request(
+            "GET",
+            f"/v1/workouts/{workout_id}",
+            allowed_statuses=(HTTPStatus.NOT_FOUND,),
+        )
+        if response.status_code == HTTPStatus.NOT_FOUND:
+            return False
+        if response.json().get("workout_summary") and not force:
+            raise ValueError(
+                f"Workout {workout_id} was already completed; pass force to delete it"
+            )
+        response = await self._request(
+            "DELETE",
+            f"/v1/workouts/{workout_id}",
+            allowed_statuses=(HTTPStatus.NOT_FOUND,),
+        )
+        return response.status_code != HTTPStatus.NOT_FOUND
+
     async def list_routes(self, external_id: str | None = None) -> list[Route]:
         await self._ensure_valid_token()
 
@@ -366,63 +590,112 @@ class WahooAPIClient:
             logger.error(f"Failed to parse plan {plan_id}: {e}")
             raise ValueError(f"Invalid plan data received from API: {e}") from e
 
-    async def create_plan(self, plan_request: CreatePlanRequest) -> CreatePlanResponse:
-        """Create a new plan in the user's library"""
-        await self._ensure_valid_token()
+    async def resolve_ftp(self, workout_type: str = "bike") -> int:
+        """Resolve the FTP: WAHOO_FTP env var, else the user's power zones."""
+        env_ftp = os.getenv("WAHOO_FTP")
+        if env_ftp:
+            try:
+                ftp = int(env_ftp)
+            except ValueError as e:
+                raise ValueError(
+                    f"WAHOO_FTP must be an integer, got {env_ftp!r}"
+                ) from e
+            if ftp <= 0:
+                raise ValueError(f"WAHOO_FTP must be positive, got {ftp}")
+            return ftp
 
-        # Convert structured plan data to Wahoo plan JSON format
-        plan_json = plan_request.plan.to_wahoo_format()
+        family, _ = WORKOUT_TYPE_HEADERS[workout_type]
+        zones = [
+            zone
+            for zone in await self.list_power_zones()
+            if zone.workout_type_family_id == family and zone.ftp > 0
+        ]
+        if not zones:
+            raise ValueError(
+                "No FTP available: set WAHOO_FTP, pass ftp, or configure power "
+                "zones in Wahoo"
+            )
+        return max(zones, key=lambda zone: zone.updated_at).ftp
 
-        # Encode as base64
-        plan_json_str = json.dumps(plan_json, separators=(",", ":"))
-        plan_base64 = base64.b64encode(plan_json_str.encode("utf-8")).decode("utf-8")
+    async def _plan_form(
+        self, plan_request: CreatePlanRequest, include_external_id: bool
+    ) -> dict[str, str]:
+        """Form data for POST/PUT /v1/plans with the base64 plan file."""
+        plan = plan_request.plan
+        ftp = plan.ftp or await self.resolve_ftp(plan.workout_type)
+        plan_json = json.dumps(plan.to_wahoo_format(ftp), separators=(",", ":"))
+        plan_base64 = base64.b64encode(plan_json.encode("utf-8")).decode("utf-8")
 
-        # Prepare form data for the API call
         form_data = {
             "plan[file]": f"data:application/json;base64,{plan_base64}",
-            "plan[external_id]": plan_request.external_id,
             "plan[provider_updated_at]": plan_request.provider_updated_at,
         }
-
+        # PUT does not accept external_id; it identifies the plan on create only
+        if include_external_id:
+            form_data["plan[external_id]"] = plan_request.external_id
         if plan_request.filename:
             form_data["plan[filename]"] = plan_request.filename
+        return form_data
 
-        response = await self.client.post(
-            "/v1/plans",
-            data=form_data,
-            headers={
-                "Authorization": f"Bearer {self.token_data.access_token}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-        )
-
-        # Handle 401 by refreshing token and retrying once
-        if response.status_code == HTTPStatus.UNAUTHORIZED:
-            logger.info("Got 401 Unauthorized, attempting to refresh token")
-            if await self._refresh_access_token():
-                response = await self.client.post(
-                    "/v1/plans",
-                    data=form_data,
-                    headers={
-                        "Authorization": f"Bearer {self.token_data.access_token}",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                )
-            else:
-                raise httpx.HTTPStatusError(
-                    "Authentication failed and token refresh was unsuccessful",
-                    request=response.request,
-                    response=response,
-                )
-
-        response.raise_for_status()
-        plan_dict = response.json()
-
+    @staticmethod
+    def _parse_plan_response(response: httpx.Response) -> CreatePlanResponse:
         try:
-            return CreatePlanResponse(**plan_dict)
+            return CreatePlanResponse(**response.json())
         except Exception as e:
-            logger.error(f"Failed to parse created plan: {e}")
+            logger.error(f"Failed to parse plan response: {e}")
             raise ValueError(f"Invalid plan data received from API: {e}") from e
+
+    async def create_plan(self, plan_request: CreatePlanRequest) -> CreatePlanResponse:
+        """Create a new plan in the user's library"""
+        form_data = await self._plan_form(plan_request, include_external_id=True)
+        response = await self._request("POST", "/v1/plans", data=form_data)
+        return self._parse_plan_response(response)
+
+    async def update_plan(
+        self, plan_id: int, plan_request: CreatePlanRequest
+    ) -> CreatePlanResponse:
+        """Replace the file of a plan this app created"""
+        form_data = await self._plan_form(plan_request, include_external_id=False)
+        response = await self._request("PUT", f"/v1/plans/{plan_id}", data=form_data)
+        return self._parse_plan_response(response)
+
+    async def find_plan_by_external_id(self, external_id: str) -> Plan | None:
+        """Find the live plan with this external_id.
+
+        Deleted plans stay visible in the lookup with deleted=true and are
+        skipped.
+        """
+        live = [
+            plan
+            for plan in await self.list_plans(external_id=external_id)
+            if plan.external_id == external_id and not plan.deleted
+        ]
+        if len(live) > 1:
+            ids = ", ".join(str(plan.id) for plan in live)
+            raise ValueError(
+                f"Several plans share external_id '{external_id}' ({ids}); "
+                "delete the duplicates first"
+            )
+        return live[0] if live else None
+
+    async def upsert_plan(
+        self, plan_request: CreatePlanRequest
+    ) -> tuple[str, CreatePlanResponse]:
+        """Replace the plan with the same external_id, or create it."""
+        existing = await self.find_plan_by_external_id(plan_request.external_id)
+        if existing is None:
+            return "created", await self.create_plan(plan_request)
+        return "updated", await self.update_plan(existing.id, plan_request)
+
+    async def delete_plan(self, plan_id: int) -> bool:
+        """Delete a plan. Returns False if it was already gone.
+
+        Workouts linked to it are kept but lose the plan.
+        """
+        response = await self._request(
+            "DELETE", f"/v1/plans/{plan_id}", allowed_statuses=(HTTPStatus.NOT_FOUND,)
+        )
+        return response.status_code != HTTPStatus.NOT_FOUND
 
     async def list_power_zones(self) -> list[PowerZone]:
         await self._ensure_valid_token()
@@ -496,7 +769,7 @@ class WahooAPIClient:
 
 def load_json_schema(schema: str) -> dict:
     """Load a JSON schema from a file."""
-    return json.loads((Path("src/schemas") / schema).read_text())
+    return json.loads((Path(__file__).parent / "schemas" / schema).read_text())
 
 
 app = Server("wahoo-mcp")
@@ -537,8 +810,46 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_plan",
-            description="Create a new plan in the user's library",
+            description=(
+                "Create a plan in the user's library, or replace the plan with "
+                "the same external_id. Linked workouts then get the new version."
+            ),
             inputSchema=load_json_schema("create_plan.json"),
+        ),
+        Tool(
+            name="schedule_workout",
+            description=(
+                "Schedule a workout on the user's Wahoo calendar, optionally "
+                "attaching a plan so it appears on ELEMNT and KICKR. The start "
+                "must be today through 6 days ahead, otherwise Wahoo never "
+                "syncs it to the devices. With a workout_token from an earlier "
+                "call, that workout is updated instead of duplicated."
+            ),
+            inputSchema=load_json_schema("schedule_workout.json"),
+        ),
+        Tool(
+            name="push_session",
+            description=(
+                "Push one planner session to Wahoo in one step: converts % FTP "
+                "to watts, creates or replaces the plan and schedules or updates "
+                "the workout. The ID pbp-<date>-<name> makes a repeated push "
+                "replace instead of duplicate. Date must be today through 6 "
+                "days ahead."
+            ),
+            inputSchema=load_json_schema("push_session.json"),
+        ),
+        Tool(
+            name="delete_workout",
+            description=(
+                "Delete a scheduled workout by workout_id or workout_token. "
+                "Completed workouts are only deleted with force."
+            ),
+            inputSchema=load_json_schema("delete_workout.json"),
+        ),
+        Tool(
+            name="delete_plan",
+            description="Delete a plan by plan_id or external_id",
+            inputSchema=load_json_schema("delete_plan.json"),
         ),
         Tool(
             name="list_power_zones",
@@ -632,22 +943,29 @@ def _build_workout_intervals(intervals_data: list) -> list[WorkoutInterval]:
     intervals = []
     for interval_data in intervals_data:
         targets = [
-            WorkoutTarget(**target_data) for target_data in interval_data["targets"]
+            WorkoutTarget(**target_data)
+            for target_data in interval_data.get("targets", [])
         ]
+        nested = interval_data.get("intervals")
 
         interval = WorkoutInterval(
-            duration=interval_data["duration"],
+            duration=interval_data.get("duration"),
             targets=targets,
             name=interval_data.get("name"),
-            interval_type=interval_data.get("interval_type", "work"),
+            interval_type=interval_data.get(
+                "interval_type", "active" if nested else "work"
+            ),
+            repeat=interval_data.get("repeat"),
+            intervals=_build_workout_intervals(nested) if nested else None,
         )
         intervals.append(interval)
     return intervals
 
 
-def _format_plan_result(created_plan) -> str:
+def _format_plan_result(created_plan, action: str = "created") -> str:
     """Format the plan creation result message."""
-    result = f"""Plan created successfully!
+    verb = "replaced" if action == "updated" else "created"
+    result = f"""Plan {verb} successfully!
 
 Plan Details:
 - ID: {created_plan.id}
@@ -679,6 +997,7 @@ async def _handle_create_plan(
         description=plan_data.get("description"),
         intervals=intervals,
         workout_type=plan_data.get("workout_type", "bike"),
+        ftp=plan_data.get("ftp"),
         # Skip optional fields that cause Wahoo API validation errors:
         # - estimated_duration: calculated automatically from intervals
         # - estimated_tss: not accepted by API
@@ -691,10 +1010,154 @@ async def _handle_create_plan(
         external_id=arguments["external_id"],
         provider_updated_at=arguments["provider_updated_at"],
     )
-    created_plan = await client.create_plan(plan_request)
+    action, created_plan = await client.upsert_plan(plan_request)
 
-    result = _format_plan_result(created_plan)
+    result = _format_plan_result(created_plan, action)
+    if action == "updated":
+        touched = await client.touch_workouts_for_plan(created_plan.id)
+        if touched:
+            ids = ", ".join(str(workout_id) for workout_id in touched)
+            result += (
+                f"\n\nMarked upcoming workouts {ids} as changed so devices "
+                "download the new plan version."
+            )
     return [TextContent(type="text", text=result)]
+
+
+async def _handle_schedule_workout(
+    client: WahooAPIClient, arguments: Arguments
+) -> ToolResponse:
+    """Handle schedule_workout tool request."""
+    workout_token = arguments.get("workout_token")
+    workout_request = CreateWorkoutRequest(
+        name=arguments["name"],
+        starts=arguments["starts"],
+        minutes=arguments["minutes"],
+        workout_token=workout_token or f"wahoo-mcp-{uuid.uuid4()}",
+        workout_type_id=arguments.get("workout_type_id", 12),
+        plan_id=arguments.get("plan_id"),
+        route_id=arguments.get("route_id"),
+    )
+    if not arguments.get("allow_outside_window", False):
+        check_schedule_window(workout_request.starts)
+
+    # Only a caller-chosen token can match an earlier push
+    if workout_token:
+        action, workout = await client.upsert_workout(workout_request)
+    else:
+        action, workout = "created", await client.create_workout(workout_request)
+
+    verb = "updated" if action == "updated" else "scheduled"
+    return [
+        TextContent(
+            type="text",
+            text=f"Workout {verb} successfully!\n\n{workout.format_summary()}",
+        )
+    ]
+
+
+async def _handle_push_session(
+    client: WahooAPIClient, arguments: Arguments
+) -> ToolResponse:
+    """Handle push_session: build the plan, replace or create it, schedule it."""
+    arguments = dict(arguments)
+    allow_outside_window = arguments.pop("allow_outside_window", False)
+    session = Session(**arguments)
+    starts = session.starts()
+    # Check everything that can fail locally before the first API request
+    if not allow_outside_window:
+        check_schedule_window(starts)
+    plan = session.to_plan()
+    sid = session.id()
+
+    ftp = plan.ftp or await client.resolve_ftp(plan.workout_type)
+    plan = plan.model_copy(update={"ftp": ftp})
+    plan_json = plan.to_wahoo_format(ftp)
+
+    plan_action, created_plan = await client.upsert_plan(
+        CreatePlanRequest(
+            plan=plan,
+            filename=f"{sid}.json",
+            external_id=sid,
+            provider_updated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    )
+    workout_action, workout = await client.upsert_workout(
+        CreateWorkoutRequest(
+            name=session.name,
+            starts=starts,
+            minutes=session.minutes(plan),
+            workout_token=sid,
+            workout_type_id=session.workout_type_id,
+            plan_id=created_plan.id,
+        ),
+        plan_changed=plan_action == "updated",
+    )
+
+    plan_verb = "replaced" if plan_action == "updated" else "created"
+    workout_verb = "updated" if workout_action == "updated" else "scheduled"
+    text = f"""Session pushed: {session.name}
+- Start: {starts:%Y-%m-%d %H:%M} ({starts.tzinfo}), {session.minutes(plan)} min
+- ID: {sid}
+- Plan {created_plan.id} {plan_verb}, workout {workout.id} {workout_verb}
+- FTP: {ftp} W
+
+Steps sent to Wahoo:
+{describe_watts(plan_json)}"""
+    return [TextContent(type="text", text=text)]
+
+
+async def _handle_delete_workout(
+    client: WahooAPIClient, arguments: Arguments
+) -> ToolResponse:
+    """Handle delete_workout tool request."""
+    workout_id = arguments.get("workout_id")
+    if workout_id is None:
+        token = arguments.get("workout_token")
+        if not token:
+            raise ValueError("Pass workout_id or workout_token")
+        workout = await client.find_workout_by_token(token)
+        if workout is None:
+            return [TextContent(type="text", text=f"No workout with token '{token}'.")]
+        workout_id = workout.id
+
+    if not await client.delete_workout(workout_id, force=arguments.get("force", False)):
+        return [
+            TextContent(type="text", text=f"Workout {workout_id} was already gone.")
+        ]
+    return [TextContent(type="text", text=f"Workout {workout_id} deleted.")]
+
+
+async def _handle_delete_plan(
+    client: WahooAPIClient, arguments: Arguments
+) -> ToolResponse:
+    """Handle delete_plan tool request."""
+    plan_id = arguments.get("plan_id")
+    if plan_id is None:
+        external_id = arguments.get("external_id")
+        if not external_id:
+            raise ValueError("Pass plan_id or external_id")
+        plan = await client.find_plan_by_external_id(external_id)
+        if plan is None:
+            return [
+                TextContent(
+                    type="text", text=f"No plan with external_id '{external_id}'."
+                )
+            ]
+        plan_id = plan.id
+
+    if not await client.delete_plan(plan_id):
+        return [TextContent(type="text", text=f"Plan {plan_id} was already gone.")]
+    return [
+        TextContent(
+            type="text",
+            text=(
+                f"Plan {plan_id} deleted. Workouts that used it are kept without plan. "
+                "Wahoo keeps the external_id reserved for the deleted plan, so "
+                "re-create it under a new external_id."
+            ),
+        )
+    ]
 
 
 async def _handle_list_power_zones(
@@ -729,6 +1192,10 @@ TOOL_HANDLERS = {
     "list_plans": _handle_list_plans,
     "get_plan": _handle_get_plan,
     "create_plan": _handle_create_plan,
+    "schedule_workout": _handle_schedule_workout,
+    "push_session": _handle_push_session,
+    "delete_workout": _handle_delete_workout,
+    "delete_plan": _handle_delete_plan,
     "list_power_zones": _handle_list_power_zones,
     "get_power_zone": _handle_get_power_zone,
 }

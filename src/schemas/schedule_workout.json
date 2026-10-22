@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Workout name shown in the Wahoo app and on the ELEMNT"
+    },
+    "starts": {
+      "type": "string",
+      "description": "Start time in ISO 8601, e.g. 2026-10-18T18:00:00+02:00. Without an offset it is read in WAHOO_TIMEZONE (default Europe/Berlin)"
+    },
+    "minutes": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Planned duration in minutes"
+    },
+    "plan_id": {
+      "type": "integer",
+      "description": "ID of a plan (from create_plan or list_plans) to attach"
+    },
+    "route_id": {
+      "type": "integer",
+      "description": "ID of a route to attach"
+    },
+    "workout_type_id": {
+      "type": "integer",
+      "description": "Wahoo workout type ID: 12 = indoor biking (default), 0 = outdoor biking, 61 = indoor trainer, 1 = running, 5 = treadmill"
+    },
+    "workout_token": {
+      "type": "string",
+      "description": "Stable identifier from the planner, e.g. pbp-2026-10-18-angels. A later call with the same token updates that workout instead of creating a duplicate. Generated (no update possible) when omitted"
+    },
+    "allow_outside_window": {
+      "type": "boolean",
+      "description": "Schedule even if the start is outside today .. today + 6 days. Wahoo accepts it, but the devices will not receive it"
+    }
+  },
+  "required": ["name", "starts", "minutes"]
+}

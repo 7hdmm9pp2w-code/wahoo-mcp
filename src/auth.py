@@ -14,12 +14,13 @@ import sys
 import time
 import webbrowser
 from http import HTTPStatus
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 from aiohttp import web
 from dotenv import load_dotenv
 
+from src.scopes import OAUTH_SCOPES
 from src.token_store import TokenData, TokenStore
 
 # Load environment variables
@@ -88,6 +89,16 @@ code_challenge = (
 )
 logger.info("PKCE challenge generated successfully")
 
+# Confidential apps authenticate with the client secret, public apps with PKCE.
+# Wahoo rejects token requests that mix both.
+USE_PKCE = not CLIENT_SECRET
+
+# Random state, checked on the callback to reject forged redirects.
+STATE = secrets.token_urlsafe(32)
+
+# Hosts for which the redirect can fail harmlessly and the URL is pasted back.
+LOCAL_HOSTS = {"localhost", "127.0.0.1"}
+
 access_token = None
 refresh_token = None
 
@@ -123,22 +134,56 @@ def _handle_missing_code() -> web.Response:
     )
 
 
+def build_auth_params() -> dict[str, str]:
+    """Query parameters for the authorization URL."""
+    params = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": OAUTH_SCOPES,
+        "state": STATE,
+    }
+    if USE_PKCE:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
+    return params
+
+
+def build_token_request(code: str) -> dict[str, str]:
+    """Form data for exchanging the authorization code."""
+    data = {
+        "client_id": CLIENT_ID,
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+    if USE_PKCE:
+        data["code_verifier"] = code_verifier
+    else:
+        data["client_secret"] = CLIENT_SECRET
+    return data
+
+
+def parse_callback_url(url: str) -> str:
+    """Extract the authorization code from a pasted callback URL."""
+    query = parse_qs(urlsplit(url.strip()).query)
+    if "error" in query:
+        description = query.get("error_description", ["Unknown error"])[0]
+        raise ValueError(f"OAuth error: {query['error'][0]} - {description}")
+    if query.get("state", [None])[0] != STATE:
+        raise ValueError("State mismatch: this URL does not belong to this login")
+    code = query.get("code", [None])[0]
+    if not code:
+        raise ValueError("No authorization code in the URL")
+    return code
+
+
 async def _exchange_code_for_token(code: str) -> dict | None:
     """Exchange authorization code for access token."""
     logger.info("Exchanging authorization code for access token...")
 
     async with httpx.AsyncClient() as client:
-        response = await client.post(
-            TOKEN_URL,
-            data={
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "code": code,
-                "redirect_uri": REDIRECT_URI,
-                "grant_type": "authorization_code",
-                "code_verifier": code_verifier,
-            },
-        )
+        response = await client.post(TOKEN_URL, data=build_token_request(code))
 
         if response.status_code == HTTPStatus.OK:
             return response.json()
@@ -156,7 +201,7 @@ def _store_tokens(token_data: dict) -> tuple[str, str | None]:
     token_obj = TokenData(
         access_token=access_token,
         refresh_token=refresh_token,
-        code_verifier=code_verifier,
+        code_verifier=code_verifier if USE_PKCE else None,
     )
     if "expires_in" in token_data:
         token_obj.expires_at = time.time() + token_data["expires_in"]
@@ -177,41 +222,15 @@ def _log_token_details(token_data: dict, refresh_token: str | None) -> None:
         logger.info("Refresh token obtained")
 
 
-def _create_success_response(
-    access_token: str, refresh_token: str | None
-) -> web.Response:
-    """Create HTML success response with token details."""
-    refresh_display = ""
-    if refresh_token:
-        refresh_display = f"""
-        <details style="margin-top: 10px;">
-        <summary style="cursor: pointer;">Refresh Token (click to show)
-        </summary>
-        <pre style="background: #f5f5f5; padding: 10px; margin-top: 10px;
-        overflow-x: auto;">{refresh_token}</pre>
-        </details>
-        """
-
+def _create_success_response() -> web.Response:
+    """Create HTML success response. Tokens stay in the token file."""
     return web.Response(
-        text=f"""
+        text="""
         <html>
         <body style="font-family: Arial, sans-serif; padding: 40px;">
         <h1 style="color: #2e7d32;">✅ Authentication Successful!</h1>
-        <p>Your tokens have been obtained.</p>
+        <p>Your tokens have been saved to the token file.</p>
         <p>You can close this window and return to the terminal.</p>
-        <details style="margin-top: 20px;">
-        <summary style="cursor: pointer;">Access Token (click to show)
-        </summary>
-        <pre style="background: #f5f5f5; padding: 10px; margin-top: 10px;
-        overflow-x: auto;">{access_token}</pre>
-        </details>
-        {refresh_display}
-        <details style="margin-top: 10px;">
-        <summary style="cursor: pointer;">Code Verifier (click to show)
-        </summary>
-        <pre style="background: #f5f5f5; padding: 10px; margin-top: 10px;
-        overflow-x: auto;">{code_verifier}</pre>
-        </details>
         </body>
         </html>
     """,
@@ -241,6 +260,13 @@ async def callback_handler(request):
     if not code:
         return _handle_missing_code()
 
+    if request.query.get("state") != STATE:
+        logger.error("State mismatch in OAuth callback")
+        return web.Response(
+            text="Error: State mismatch, please start the login again",
+            status=HTTPStatus.BAD_REQUEST,
+        )
+
     logger.info(f"Received authorization code: {code[:10]}...")
 
     try:
@@ -250,13 +276,51 @@ async def callback_handler(request):
 
         access_token, refresh_token = _store_tokens(token_data)
         _log_token_details(token_data, refresh_token)
-        return _create_success_response(access_token, refresh_token)
+        return _create_success_response()
 
     except Exception as e:
         logger.exception("Error during token exchange")
         return web.Response(
             text=f"Error: {str(e)}", status=HTTPStatus.INTERNAL_SERVER_ERROR
         )
+
+
+def use_paste_flow() -> bool:
+    """An https redirect to localhost cannot be served by the plain-HTTP
+    callback server, so the user pastes the redirected URL instead."""
+    return REDIRECT_SCHEME == "https" and REDIRECT_HOST in LOCAL_HOSTS
+
+
+async def paste_flow() -> bool:
+    """Log in by pasting the redirected URL from the browser's address bar."""
+    auth_url = f"{AUTH_URL}?{urlencode(build_auth_params())}"
+    print("\n📌 Opening browser for authentication...")
+    print("If browser doesn't open automatically, visit this URL:")
+    print(f"\n{auth_url}\n")
+    webbrowser.open(auth_url)
+
+    print(
+        f"After you approve access, the browser is redirected to {REDIRECT_URI} "
+        "and shows a connection error. That is expected.\n"
+        "Copy the full URL from the address bar and paste it here."
+    )
+    pasted = await asyncio.to_thread(input, "\nRedirected URL: ")
+
+    try:
+        code = parse_callback_url(pasted)
+    except ValueError as e:
+        print(f"\n❌ {e}")
+        return False
+
+    token_data = await _exchange_code_for_token(code)
+    if not token_data:
+        print("\n❌ Token exchange failed, see the log above.")
+        return False
+
+    _, refresh_token = _store_tokens(token_data)
+    _log_token_details(token_data, refresh_token)
+    print(f"\n✅ Success! Tokens saved to: {token_store.token_file}")
+    return True
 
 
 async def start_server():
@@ -291,20 +355,7 @@ async def start_server():
         await runner.cleanup()
         return
 
-    # Build authorization URL
-    auth_params = {
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "response_type": "code",
-        "scope": (
-            "user_read workouts_read routes_read plans_read "
-            "plans_write power_zones_read"
-        ),
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-
-    auth_url = f"{AUTH_URL}?{urlencode(auth_params)}"
+    auth_url = f"{AUTH_URL}?{urlencode(build_auth_params())}"
 
     logger.info("Opening browser for Wahoo OAuth authentication...")
     print("\n📌 Opening browser for authentication...")
@@ -345,7 +396,7 @@ async def start_server():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(start_server())
+        asyncio.run(paste_flow() if use_paste_flow() else start_server())
     except KeyboardInterrupt:
         logger.info("Authentication process cancelled by user")
         print("\n\nAuthentication cancelled.")
