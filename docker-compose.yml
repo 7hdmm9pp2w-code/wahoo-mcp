@@ -1,0 +1,39 @@
+# wahoo-mcp on a Synology NAS (Container Manager → Project) or any Docker host.
+#
+# 1. Copy this repository to the NAS, e.g. /volume1/docker/wahoo-mcp
+# 2. Create .env next to this file (see .env.example and README "Remote server")
+# 3. Put the token.json from `make auth` into ./data/ (only one copy may be in use:
+#    every token refresh invalidates the previous refresh token)
+# 4. docker compose up -d --build
+
+services:
+  wahoo-mcp:
+    build: .
+    container_name: wahoo-mcp
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WAHOO_TOKEN_FILE: /data/token.json
+    volumes:
+      # Writable: the server stores refreshed Wahoo tokens here
+      - ./data:/data
+    # Run as the NAS user that owns ./data (Synology: `id` in an SSH shell,
+    # often 1026:100). Must be able to write data/token.json.
+    user: "${WAHOO_UID:-1000}:${WAHOO_GID:-1000}"
+    # Only for tests on the LAN; the tunnel below reaches the container
+    # without a published port.
+    # ports:
+    #   - "8000:8000"
+
+  # Public HTTPS via Cloudflare Tunnel (https://one.dash.cloudflare.com →
+  # Networks → Tunnels). Route the public hostname to http://wahoo-mcp:8000.
+  # Start with: docker compose --profile tunnel up -d
+  cloudflared:
+    image: cloudflare/cloudflared:2025.8.0
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - wahoo-mcp
