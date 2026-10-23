@@ -1,6 +1,6 @@
 # Zielbild: Trainingssteuerung
 
-Stand 22.10.2026. Entwurf, Rahmenbedingungen abgestimmt, noch nicht umgesetzt.
+Stand 23.10.2026. Rahmenbedingungen abgestimmt; Übergangsbetrieb bis Februar läuft, das Zielbild ohne Claude ist abgestimmt (Abschnitt unten).
 
 ## Ziel
 
@@ -10,11 +10,11 @@ Jeden Morgen eine begründete Empfehlung: **Was trainiere ich heute, und passt d
 
 | Quelle | Liefert | Zugang | Stand |
 |---|---|---|---|
-| Garmin Fenix 7 | Läufe (FIT), Ruhe-HF, HRV, Schlaf, Body Battery | Garmin Connect API, Stufe Personal (kostenlos, eigene Daten) | Key beantragen; was die API wirklich liefert, ist ungeprüft |
+| Garmin Fenix 7 | Ruhe-HF, HRV, Schlaf, Body Battery, Stress, Aktivitäten (FIT) | offizielle Garmin Connect Personal API, eigener `garmin-mcp` (nur lesend, Schlüssel im Mac-Schlüsselbund) | ✅ läuft seit 23.10.2026; ohne Training Readiness, Training Status, VO2max-Verlauf |
 | Wahoo Cloud | Radeinheiten von KICKR/ROAM inkl. Leistung, FTP | eigener `wahoo-mcp` | ✅ läuft (PR #1) |
-| Wahoo SYSTM | Bibliothek (über 1000 Einheiten), 4DP-Profil (FTP, MAP, AC, NM), Kalender | `wahoo-systm-mcp` (inoffizielle API) | geprüft, noch zu installieren |
+| Wahoo SYSTM | Bibliothek (über 1000 Einheiten), 4DP-Profil (FTP, MAP, AC, NM), Kalender | `wahoo-systm-mcp` (inoffizielle API) | ✅ installiert; der SYSTM-Kalender ist der eine Ort für alles Geplante (Rad, Lauf, Kraft als Platzhalter) |
 | Strava | alle Aktivitäten an einer Stelle | Konnektor in Claude | vorhanden, Rückfallebene |
-| Familienkalender | belegte Zeiten aus fünf Kalendern: Familie, Christopher, Stephanie, Ferien NRW, Geburtstage | vorhandene TRMNL-Kalenderbrücke `calbridge` auf dem NAS, `familie.json` (`week` und `week_next` = 14 Tage mit Start und Ende) | vorhanden; der Hub muss ins Docker-Netz von Terminus |
+| Familien- und Kanzleikalender | belegte Zeiten aus Familie, Christopher, Stephanie, Ferien NRW, Geburtstage und Kanzlei (nur frei/belegt, auf dem TRMNL verborgen) | vorhandene TRMNL-Kalenderbrücke `calbridge` auf dem NAS, `familie.json` (`week` und `week_next` = 14 Tage mit Start und Ende) | vorhanden; der Hub muss ins Docker-Netz von Terminus |
 | Hevy (über Strava) | Hanteltraining | Strava-API (eigene App für den Hub) | Strava-Konnektor in Claude vorhanden |
 | Du | Befinden, Beine, Zeit heute | kurzer Check-in im Chat | – |
 
@@ -106,6 +106,52 @@ Strava  ─▶ Konnektor (Rückfall)
 - **Strava wird wichtiger:** Über Strava kommen die Hevy-Krafteinheiten herein. Für den Hub auf dem NAS reicht der Strava-Konnektor in Claude nicht. Der Hub braucht eine eigene Strava-API-App, kostenlos und nur für dich.
 - **Frühe Einheiten und der 6-Uhr-Check:** Eine Einheit vor der Arbeit beginnt womöglich vor 6 Uhr. Deshalb kommt der Vorschlag für den nächsten Tag schon mit der rollenden Planung am Vortag. Der 6-Uhr-Check passt ihn nur noch nach Schlaf und HRV an.
 - **Kraft als eigene Einheit:** Hanteltraining wird nicht über TSS gezählt, aber als harter Reiz behandelt: nicht direkt vor einer Schlüsseleinheit, gern an lockeren Tagen.
-- **Brevets im normalen Kalender:** Brevets kommen nach und nach dazu, sobald du dich anmeldest; der erste ist im Dezember 2026. Sie stehen in deinem normalen Kalender, mit **„Brevet“ und der Distanz im Titel**, z. B. „Brevet 200 km Köln“. Weil `belegt.json` bewusst keine Titel enthält, bekommt `calbridge` in Phase 3 eine kleine Sicht `ziele`. Sie sucht 12 Monate voraus nur nach diesem Stichwort und gibt Datum und Distanz aus, sonst nichts. Brevets sind die Fixpunkte der Periodisierung: Vorbelastung davor, Erholung danach.
+- **Brevets im normalen Kalender:** Brevets kommen nach und nach dazu, sobald du dich anmeldest; der erste ist im Dezember 2026. Sie stehen in deinem normalen Kalender, mit **„Brevet“ und der Distanz im Titel**, z. B. „Brevet 200 km Köln“. Der PBP-Planer findet sie heute schon über die Kalendersuche nach „BRM“ bzw. „… km“ und bietet sie zur Übernahme an; ein Titel wie „BRM 200 Köln“ ist daher am sichersten. Ohne Claude übernimmt das eine kleine Sicht `ziele` in `calbridge`: 12 Monate voraus nur dieses Stichwort, Datum und Distanz, sonst nichts. Brevets sind die Fixpunkte der Periodisierung: Vorbelastung davor, Erholung danach.
+
+## Übergang bis Februar (mit Claude)
+
+- **Leitstand ist der PBP-Planer** (Claude-Artefakt): Makroplan, Regelwerk, Zeitfenster aus Fastmail (Kanzlei nur als belegt), Abgleich mit Strava, CTL/TSB, Coach-Notiz.
+- **Morgens** schlägt der Training-Chat in Claude Desktop vor, du bestätigst, er plant in SYSTM ein bzw. schickt die Einheit auf den ROAM.
+- **Erholung** kommt aus `garmin-mcp` (HRV, Schlaf, Ruhepuls, Body Battery).
+- **Geparkt:** NAS-Betrieb mit HTTP und Login (PR #2), Trainings-Hub.
+
+## Zielbild ohne Claude (ab Mac Studio, abgestimmt am 23.10.2026)
+
+**Faustregel: Das NAS sammelt und rechnet, der Mac Studio denkt mit.**
+
+```
+Wahoo · SYSTM · Garmin · Strava · Kalender
+            │  MCP-Server, unverändert übernommen
+            ▼
+NAS (läuft immer)                         Mac Studio (läuft immer)
+├─ Trainings-Hub: Datenbank, Abgleich     ├─ lokales Sprachmodell
+├─ Rechenlogik: CTL/ATL/TSB, Ampel,       │  nutzt dieselben MCP-Server
+│  Zeitfenster, Makroplan, Regelwerk  ◀───┤  und liest Kennzahlen aus dem Hub
+├─ Planer-Webseite (aus dem Artefakt)     └─ schreibt Vorschlag + Begründung
+├─ TRMNL-Kachel „Heute“                       in den Hub
+└─ Ausführen: SYSTM, ROAM, später Fenix
+```
+
+**Ablauf am Morgen**
+
+1. **5:30, NAS:** Abgleich aller Quellen in den Hub, Kennzahlen neu rechnen.
+2. **6:00, Mac Studio:** Die lokale KI liest Hub und freie Zeitfenster, schreibt den Vorschlag mit Begründung und legt ihn im Hub ab.
+3. **Danach:** Der Vorschlag erscheint auf der Planer-Webseite und als TRMNL-Kachel. Auf deinen Klick wird in SYSTM bzw. auf den ROAM eingeplant.
+
+**Grundsätze**
+
+- **Rechnen im Code, nicht in der KI.** Belastung, Ampel und Zeitfenster sind feste, getestete Regeln auf dem NAS. Die KI formuliert, begründet und reagiert auf Ausnahmen („Knie zwickt“, „nur 40 Minuten“), rät aber keine Werte.
+- **Der Planer wird eine Web-App auf dem NAS.** Logik und Oberfläche ziehen aus dem Artefakt um, die Daten kommen aus dem Hub statt über Claude-Konnektoren. Die Bedienung bleibt: Heute, Woche, Ausfälle, Brevetkarte.
+- **Die MCP-Server bleiben.** `wahoo-mcp`, `garmin-mcp` und `wahoo-systm-mcp` laufen lokal über stdio und ziehen unverändert um.
+- **Das NAS bleibt die Datenbasis**, obwohl der Mac Studio immer läuft: Dort laufen schon `calbridge` und Terminus, dort liegen die Sicherungen, und die Daten hängen nicht an Updates oder Neustarts der KI-Maschine.
+
+**Vorbereitung bis dahin**
+
+- Den Zustand des Planers (Ausfälle, Brevets, Einstellungen, Erledigt-Häkchen) regelmäßig als JSON sichern.
+- Den Garmin-Schlüssel rechtzeitig erneuern; er läuft nach der gewählten Frist ab.
+
+**Offen**
+
+- Wie du mit der lokalen KI sprichst: Webseite, Mac, Handy, iMessage oder Mail. Das wird so gebaut, dass weitere Ausgänge nur angehängt werden müssen.
 
 Keine medizinische Beratung: Bei Krankheit oder Schmerzen gilt das nicht, dann entscheidest du bzw. dein Arzt.
