@@ -58,3 +58,6 @@ Thumbs.db
 
 # pytest-cov
 coverage.xml
+
+# Docker volume with the Wahoo token file
+data/

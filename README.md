@@ -356,6 +356,30 @@ Delete a plan by `plan_id` or `external_id`. Linked workouts are kept without pl
 #### Rate limits
 Sandbox apps may send 25 requests per 5 minutes, 100 per hour and 250 per day. On HTTP 429 the server waits up to 60 s (`Retry-After` / `X-RateLimit-Reset`) and retries once, otherwise it reports when to try again. A replacing push costs about 4 requests (plan lookup, plan PUT, workout lookup, workout PUT).
 
+## Remote server (HTTP, Docker)
+
+Status: tested locally (HTTP transport, OAuth flow, live Wahoo call); not yet deployed on the NAS.
+
+To use the server from claude.ai connectors or scheduled Claude runs, run it as a remote MCP server with Streamable HTTP at `/mcp`:
+
+```bash
+uv run python -m src.http_app
+```
+
+| Variable | Purpose |
+|---|---|
+| `WAHOO_PUBLIC_URL` | Public HTTPS base URL, e.g. `https://wahoo.example.com`; the connector URL is `<WAHOO_PUBLIC_URL>/mcp` |
+| `WAHOO_OAUTH_PASSWORD` | Enables OAuth 2.1 with Dynamic Client Registration for claude.ai connectors. When Claude connects, you enter this password on the server's `/login` page (at least 12 characters) |
+| `WAHOO_MCP_TOKEN` | Static bearer token (at least 32 characters, e.g. `openssl rand -hex 32`), e.g. for `claude mcp add --transport http … --header "Authorization: Bearer …"` |
+| `WAHOO_OAUTH_REDIRECT_ALLOWLIST` | Redirect URIs allowed to register; default: `https://claude.ai/api/mcp/auth_callback` and loopback for Claude Code |
+| `WAHOO_OAUTH_STATE_FILE` | OAuth clients and token hashes; default: next to `WAHOO_TOKEN_FILE` |
+| `WAHOO_HTTP_HOST` / `WAHOO_HTTP_PORT` | Bind address, default `0.0.0.0:8000` |
+| `WAHOO_ALLOW_NO_AUTH=1` | Run without access control (local tests only) |
+
+The server refuses to start without `WAHOO_OAUTH_PASSWORD` or `WAHOO_MCP_TOKEN`. Access tokens are stored only as SHA-256 hashes, and refresh tokens rotate on every use. After 5 wrong passwords within 15 minutes, the login locks. `GET /health` needs no token.
+
+**Docker / Synology:** `docker-compose.yml` builds the image, mounts `./data` for `token.json` and the OAuth state, and has an optional Cloudflare Tunnel service (`docker compose --profile tunnel up -d`, `CLOUDFLARE_TUNNEL_TOKEN` in `.env`). Copy the `token.json` from `make auth` to `./data/`. Use only one copy: every Wahoo token refresh invalidates the previous refresh token, so the Mac and the NAS must not refresh in parallel.
+
 ## Development
 
 ### Running Tests

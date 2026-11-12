@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+.env
+.env.*
+token.json
+data/
+tests/
+docs/
+**/__pycache__
+.pytest_cache
+.ruff_cache
+coverage.xml
+junit.xml
